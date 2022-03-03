@@ -136,8 +136,9 @@ type NextServerJoiningRes struct {
 }
 
 type ServerJoinedArgs struct {
-	serverId uint8
-	sToken   tracing.TracingToken
+	serverId         uint8
+	serverListenAddr string
+	sToken           tracing.TracingToken
 }
 
 type ServerJoinedRes struct {
@@ -195,7 +196,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		sToken:   trace.GenerateToken(),
 	}
 	var serverJoiningRes ServerJoiningRes
-	err = cClient.Call("Coord.ServerJoin", serverJoiningArgs, &serverJoiningRes)
+	err = cClient.Call("Coord.OnServerJoining", serverJoiningArgs, &serverJoiningRes)
 	if err != nil {
 		return err
 	}
@@ -236,11 +237,12 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	trace = strace.ReceiveToken(sToken)
 	trace.RecordAction(ServerJoined{serverId})
 	serverJoinedArgs := &ServerJoinedArgs{
-		serverId: serverId,
-		sToken:   trace.GenerateToken(),
+		serverId:         serverId,
+		serverListenAddr: serverListenAddr,
+		sToken:           trace.GenerateToken(),
 	}
 	var serverJoinedRes ServerJoinedRes // TODO: maybe no response necessary?
-	err = cClient.Call("Coord.ServerJoined", serverJoinedArgs, &serverJoinedRes)
+	err = cClient.Call("Coord.OnServerJoined", serverJoinedArgs, &serverJoinedRes)
 	if err != nil {
 		return err
 	}
