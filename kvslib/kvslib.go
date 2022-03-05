@@ -1,8 +1,13 @@
 package kvslib
 
 import (
+	"bytes"
 	"cs.ubc.ca/cpsc416/a3/util"
+	"encoding/gob"
 	"github.com/DistributedClocks/tracing"
+	"net"
+	"net/rpc"
+	"time"
 )
 
 // Actions to be recorded by kvslib (as part of ktrace, put trace, get trace):
@@ -71,11 +76,17 @@ type ResultStruct struct {
 type KVS struct {
 	notifyCh NotifyChannel
 	// Add more KVS instance state here.
-	clientId    string
-	tracer      *tracing.Tracer
-	coordIPPort string
-	opId        uint32
-	localMap    map[string]string
+	clientId         string
+	tracer           *tracing.Tracer
+	localCoordIPPort string
+	coordIPPort      string
+	headLocalIP      string
+	headRemoteIP     string
+	tailLocalIP      string
+	tailRemoteIP     string
+	headServerId     uint8
+	tailServerId     uint8
+	opId             uint32
 }
 
 func NewKVS() *KVS {
@@ -97,56 +108,16 @@ func (d *KVS) Start(localTracer *tracing.Tracer, clientId string, coordIPPort st
 	d.notifyCh = make(NotifyChannel, chCapacity)
 	d.opId = 0
 
-	// TODO use chained servers
-	// TODO add fcheck to monitor coord
-	/*
-		// Connect to coord
-		localCoordAddr, err := net.ResolveUDPAddr("udp", localCoordIPPort)
-		if err != nil {
-			return nil, err
-		}
-		coordAddr, err := net.ResolveUDPAddr("udp", coordIPPort)
-		if err != nil {
-			return nil, err
-		}
-		coordConn, err := net.DialUDP("udp", localCoordAddr, coordAddr)
-		if err != nil {
-			return nil, err
-		}
+	// Connect to coord
+	conn := makeConnection(localCoordIPPort, coordIPPort)
 
-		// Send head request
-		var bufArray bytes.Buffer
-		headReq := HeadReq{clientId}
-		trace.RecordAction(headReq)
-		gob.NewEncoder(&bufArray).Encode(&headReq)
-		coordConn.Write(bufArray.Bytes())
+	// Get head server from coord
+	traceAndSendHeadReq(conn, clientId, trace)
+	d.headServerId = recvAndTraceHeadRes(conn, trace)
 
-		// Get head response
-		recvBuf := make([]byte, 1024)
-		var headRes HeadResRecvd
-		numRead, err := coordConn.Read(recvBuf)
-		err = gob.NewDecoder(bytes.NewBuffer(recvBuf[0:numRead])).Decode(&headRes)
-		if err != nil {
-			return nil, err
-		}
-		trace.RecordAction(headRes)
-
-		// Send tail request
-		tailReq := TailReq{clientId}
-		trace.RecordAction(tailReq)
-		gob.NewEncoder(&bufArray).Encode(&tailReq)
-		coordConn.Write(bufArray.Bytes())
-
-		// Get tail response
-		recvBuf = make([]byte, 1024)
-		var tailRes TailResRecvd
-		numRead, err = coordConn.Read(recvBuf)
-		err = gob.NewDecoder(bytes.NewBuffer(recvBuf[0:numRead])).Decode(&tailRes)
-		if err != nil {
-			return nil, err
-		}
-		trace.RecordAction(tailRes)
-	*/
+	// Get tail server from coord
+	traceAndSendTailReq(conn, clientId, trace)
+	d.tailServerId = recvAndTraceTailRes(conn, trace)
 
 	return d.notifyCh, nil
 }
@@ -162,16 +133,21 @@ func (d *KVS) Get(tracer *tracing.Tracer, clientId string, key string) (uint32, 
 	localOpId := d.opId
 	d.opId++
 
-	// TODO convert to async with server
 	// Send get to tail
+	conn := makeConnection(d.tailLocalIP, d.tailRemoteIP)
+	client := rpc.NewClient(conn)
+	// TODO encode get?
+
+	get := Get{clientId, localOpId, key}
 	trace := tracer.CreateTrace()
-	trace.RecordAction(Get{clientId, localOpId, key})
+	trace.RecordAction(get)
 
-	// Get result from tail
-	value := d.localMap[key]
-	trace.RecordAction(GetResultRecvd{localOpId, uint64(localOpId), key, value})
+	err := client.Call("Get", get, &d.notifyCh)
+	if err != nil {
+		return 0, err
+	}
+	go receiveGetResult(get, trace, d.notifyCh)
 
-	//return 0, errors.New("not implemented")
 	return localOpId, nil
 }
 
@@ -186,13 +162,20 @@ func (d *KVS) Put(tracer *tracing.Tracer, clientId string, key string, value str
 	localOpId := d.opId
 	d.opId++
 
-	// TODO convert to async with server
 	// Send put to head
+	conn := makeConnection(d.headLocalIP, d.headRemoteIP)
+	client := rpc.NewClient(conn)
+
+	put := Put{clientId, localOpId, key, value}
 	trace := tracer.CreateTrace()
-	trace.RecordAction(Put{clientId, localOpId, key, value})
+	trace.RecordAction(put)
 
 	// Get result from tail
-	trace.RecordAction(PutResultRecvd{localOpId, uint64(localOpId), key})
+	err := client.Call("Put", put, &d.notifyCh)
+	if err != nil {
+		return 0, err
+	}
+	go receivePutResult(put, trace, d.notifyCh)
 
 	//return 0, errors.New("not implemented")
 	return localOpId, nil
@@ -206,4 +189,107 @@ func (d *KVS) Stop() {
 	err := d.tracer.Close()
 	util.CheckErr(err, "The KVS tracer could not be closed")
 	return
+}
+
+// Creates a TCP connection between localAddr and remoteAddr
+func makeConnection(localAddr string, remoteAddr string) *net.TCPConn {
+	localTcpAddr, err := net.ResolveTCPAddr("tcp", localAddr)
+	util.CheckErr(err, "Could not resolve address: "+localAddr)
+	remoteTcpAddr, err := net.ResolveTCPAddr("tcp", remoteAddr)
+	util.CheckErr(err, "Could not resolve address: "+remoteAddr)
+	conn, err := net.DialTCP("tcp", localTcpAddr, remoteTcpAddr)
+	util.CheckErr(err, "Could not connect: "+localAddr+" and "+remoteAddr)
+
+	return conn
+}
+
+func traceAndSendHeadReq(conn *net.TCPConn, clientId string, trace *tracing.Trace) {
+	var bufArray bytes.Buffer
+	headReq := HeadReq{clientId}
+	trace.RecordAction(headReq)
+	err := gob.NewEncoder(&bufArray).Encode(&headReq)
+	util.CheckErr(err, "Could not encode KVS head request")
+	_, err = conn.Write(bufArray.Bytes())
+	util.CheckErr(err, "Could not send KVS head request")
+}
+
+func recvAndTraceHeadRes(conn *net.TCPConn, trace *tracing.Trace) uint8 {
+	recvBuf := make([]byte, 1024)
+	var headRes HeadResRecvd
+	// TODO use fcheck
+	err := conn.SetReadDeadline(time.Now().Add(time.Duration(1) * time.Second))
+	util.CheckErr(err, "Could not set read deadline for KVS head response")
+	numRead, err := conn.Read(recvBuf)
+	err = gob.NewDecoder(bytes.NewBuffer(recvBuf[0:numRead])).Decode(&headRes)
+	if err != nil {
+		// Timeout; try again
+		recvAndTraceHeadRes(conn, trace)
+	}
+	trace.RecordAction(headRes)
+	return headRes.ServerId
+}
+
+func traceAndSendTailReq(conn *net.TCPConn, clientId string, trace *tracing.Trace) {
+	var bufArray bytes.Buffer
+	tailReq := TailReq{clientId}
+	trace.RecordAction(tailReq)
+	err := gob.NewEncoder(&bufArray).Encode(&tailReq)
+	util.CheckErr(err, "Could not encode KVS tail request")
+	_, err = conn.Write(bufArray.Bytes())
+	util.CheckErr(err, "Could not send KVS tail request")
+}
+
+func recvAndTraceTailRes(conn *net.TCPConn, trace *tracing.Trace) uint8 {
+	recvBuf := make([]byte, 1024)
+	var tailRes TailResRecvd
+	err := conn.SetReadDeadline(time.Now().Add(time.Duration(1) * time.Second))
+	util.CheckErr(err, "Could not set read deadline for KVS tail response")
+	numRead, err := conn.Read(recvBuf)
+	err = gob.NewDecoder(bytes.NewBuffer(recvBuf[0:numRead])).Decode(&tailRes)
+	if err != nil {
+		// Timeout; try again
+		recvAndTraceTailRes(conn, trace)
+	}
+	trace.RecordAction(tailRes)
+	return tailRes.ServerId
+}
+
+func receiveGetResult(get Get, trace *tracing.Trace, notifyCh NotifyChannel) {
+	for {
+		select {
+		case result := <-notifyCh:
+			// TODO decode result?
+			if result.OpId == get.OpId {
+				getResult := GetResultRecvd{
+					OpId:  result.OpId,
+					GId:   result.GId,
+					Key:   get.Key,
+					Value: result.Result,
+				}
+				trace.RecordAction(getResult)
+				return
+			}
+		case <-time.After(time.Duration(100)):
+			// TODO resend request?
+		}
+	}
+}
+
+func receivePutResult(put Put, trace *tracing.Trace, ch NotifyChannel) {
+	for {
+		select {
+		case result := <-ch:
+			// TODO decode result?
+			if result.OpId == put.OpId {
+				putResult := PutResultRecvd{
+					OpId: result.OpId,
+					GId:  result.GId,
+					Key:  put.Key,
+				}
+				trace.RecordAction(putResult)
+			}
+		case <-time.After(time.Duration(100)):
+			// TODO resend request?
+		}
+	}
 }
