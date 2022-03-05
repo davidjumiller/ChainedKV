@@ -64,29 +64,16 @@ var monitorCh = make(chan int)
 
 // Starts the fcheck library.
 func Start(arg StartStruct) (notifyCh <-chan FailureDetected, err error) {
+	// Respond to heartbeats
+	StartListener(arg.AckLocalIPAckLocalPort)
+
 	if arg.HBeatLocalIPHBeatLocalPort == "" {
-		// ONLY arg.AckLocalIPAckLocalPort is set
-		// Start fcheck without monitoring any node, but responding to heartbeats.
-
-		// Create listener for heartbeats
-		ackAddr, err := net.ResolveUDPAddr("udp", arg.AckLocalIPAckLocalPort)
-		ln, err = net.ListenUDP("udp", ackAddr)
-		CheckErr(err, "Could not listen on", arg.AckLocalIPAckLocalPort)
-
-		// Listen forever...
-		go listen(ln)
+		// ONLY arg.AckLocalIPAckLocalPort is set; do not monitor any nodes
 		return nil, nil
 	}
-	// Else: ALL fields in arg are set
-	// Start the fcheck library by monitoring a single node and
-	// also responding to heartbeats.
+	// Else: ALL fields in arg are set; start monitoring a node
 
-	// Initialize listener
-	ackAddr, err := net.ResolveUDPAddr("udp", arg.AckLocalIPAckLocalPort)
-	ln, err = net.ListenUDP("udp", ackAddr)
-	CheckErr(err, "Could not listen on", arg.AckLocalIPAckLocalPort, err)
-
-	// Initialize connection
+	// Initialize connection to remote node
 	localAddr, err := net.ResolveUDPAddr("udp", arg.HBeatLocalIPHBeatLocalPort)
 	CheckErr(err, "Error converting UDP address: %v\n", err)
 	remoteAddr, err := net.ResolveUDPAddr("udp", arg.HBeatRemoteIPHBeatRemotePort)
@@ -97,10 +84,21 @@ func Start(arg StartStruct) (notifyCh <-chan FailureDetected, err error) {
 	// Monitor node
 	go monitor(conn, arg.EpochNonce, arg.LostMsgThresh, arg.HBeatRemoteIPHBeatRemotePort)
 
-	// Respond to heartbeats
+	return globalCh, nil
+}
+
+// Starts a heartbeat listener
+func StartListener(ackLocalIPAckLocalPort string) net.Addr {
+	// Create listener for heartbeats
+	ackAddr, err := net.ResolveUDPAddr("udp", ackLocalIPAckLocalPort)
+	ln, err := net.ListenUDP("udp", ackAddr)
+	CheckErr(err, "Could not listen on", ackLocalIPAckLocalPort)
+
+	// Listen forever...
 	go listen(ln)
 
-	return globalCh, nil
+	// Return address that fcheck is listening on
+	return ln.LocalAddr()
 }
 
 // Tells the library to stop monitoring/responding acks.
