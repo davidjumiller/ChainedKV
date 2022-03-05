@@ -1,10 +1,13 @@
 package chainedkv
 
 import (
+	fchecker "cs.ubc.ca/cpsc416/a3/fcheck"
 	"errors"
+	"fmt"
 	"github.com/DistributedClocks/tracing"
 	"net"
 	"net/rpc"
+	"strings"
 	"sync"
 )
 
@@ -138,6 +141,7 @@ type NextServerJoiningRes struct {
 
 type ServerJoinedArgs struct {
 	serverId         uint8
+	ackAddr          string
 	serverListenAddr string
 	sToken           tracing.TracingToken
 }
@@ -165,23 +169,21 @@ func NewServer() *Server {
 }
 
 func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serverServerAddr string, serverListenAddr string, clientListenAddr string, strace *tracing.Tracer) error {
-	// Spin up goroutine to ack heartbeats coming from coord?
-
 	s.strace = strace
 	trace := strace.CreateTrace()
 	trace.RecordAction(ServerStart{serverId})
 
 	/* Connect to coord */
 	// Connection establishment code adapted from Piazza post @471_f1
-	laddr, err := net.ResolveTCPAddr("tcp", serverAddr)
+	serverTCPAddr, err := net.ResolveTCPAddr("tcp", serverAddr)
 	if err != nil {
 		return err
 	}
-	raddr, err := net.ResolveTCPAddr("tcp", coordAddr)
+	coordTCPAddr, err := net.ResolveTCPAddr("tcp", coordAddr)
 	if err != nil {
 		return err
 	}
-	cConn, err := net.DialTCP("tcp", laddr, raddr)
+	cConn, err := net.DialTCP("tcp", serverTCPAddr, coordTCPAddr)
 	if err != nil {
 		return err
 	}
@@ -228,6 +230,10 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	s.isHead = tailServerListenAddr == ""
 	s.predecessorListenAddr = tailServerListenAddr
 
+	// Start listening to heartbeats on random port
+	ackIP := strings.Split(serverAddr, ":")[0]
+	ackAddr := fchecker.StartListener(fmt.Sprint(ackIP, ":"))
+
 	// Start listening for RPCs
 	err = s.handleRPC(serverListenAddr)
 	if err != nil {
@@ -239,6 +245,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	trace.RecordAction(ServerJoined{serverId})
 	serverJoinedArgs := &ServerJoinedArgs{
 		serverId:         serverId,
+		ackAddr:          ackAddr.String(),
 		serverListenAddr: serverListenAddr,
 		sToken:           trace.GenerateToken(),
 	}
