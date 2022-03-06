@@ -5,6 +5,7 @@ import (
 	"github.com/DistributedClocks/tracing"
 	"net"
 	"net/rpc"
+	"time"
 )
 
 // Actions to be recorded by kvslib (as part of ktrace, put trace, get trace):
@@ -78,7 +79,7 @@ type GetResultArgs struct {
 
 type ClientArgs struct {
 	ClientId   string
-	ClientAddr string
+	ClientAddr string // Might not need this field
 	KToken     tracing.TracingToken
 }
 
@@ -118,18 +119,19 @@ type ResultStruct struct {
 type KVS struct {
 	NotifyCh NotifyChannel
 	// Add more KVS instance state here.
-	Tracer           *tracing.Tracer
-	KTrace           *tracing.Trace
-	ClientId         string
-	CoordLocalIPPort string
-	HeadLocalIP      string
-	HeadRemoteIP     string
-	TailLocalIP      string
-	TailRemoteIP     string
-	CoordListener    *net.TCPListener
-	HeadListener     *net.TCPListener
-	TailListener     *net.TCPListener
-	OpId             uint32
+	Tracer          *tracing.Tracer
+	KTrace          *tracing.Trace
+	ClientId        string
+	LocalCoordAddr  string
+	RemoteCoordAddr string
+	LocalHeadAddr   string
+	RemoteHeadAddr  string
+	LocalTailAddr   string
+	RemoteTailAddr  string
+	HeadListener    *net.TCPListener
+	TailListener    *net.TCPListener
+	OpId            uint32
+	InProgress      map[uint32]bool
 }
 
 func NewKVS() *KVS {
@@ -144,55 +146,30 @@ func NewKVS() *KVS {
 // factor at the client: the client will never have more than ChCapacity number of operations outstanding (pending concurrently) at any one time.
 // If there is an issue with connecting to the coord, this should return an appropriate err value, otherwise err should be set to nil.
 func (d *KVS) Start(localTracer *tracing.Tracer, clientId string, coordIPPort string, localCoordIPPort string, localHeadServerIPPort string, localTailServerIPPort string, chCapacity int) (NotifyChannel, error) {
-	d.CoordLocalIPPort = localCoordIPPort
+	d.LocalCoordAddr = localCoordIPPort
+	d.RemoteCoordAddr = coordIPPort
+	d.LocalHeadAddr = localHeadServerIPPort
+	d.LocalTailAddr = localTailServerIPPort
 	d.NotifyCh = make(NotifyChannel, chCapacity)
 	d.OpId = 0
 	d.Tracer = localTracer
 	d.KTrace = d.Tracer.CreateTrace()
 	d.KTrace.RecordAction(KvslibStart{clientId})
+	d.InProgress = make(map[uint32]bool)
 
 	// Setup RPC
 	err := rpc.Register(d)
 	if err != nil {
 		return nil, err
 	}
-	d.CoordListener, err = startRPCListener(localCoordIPPort)
-	util.CheckErr(err, "Could not start coord listener in Start")
 	d.HeadListener, err = startRPCListener(localHeadServerIPPort)
 	util.CheckErr(err, "Could not start head listener in Start")
 	d.TailListener, err = startRPCListener(localTailServerIPPort)
 	util.CheckErr(err, "Could not start tail listener in Start")
 
 	// Connect to coord
-	conn := makeConnection(localCoordIPPort, coordIPPort)
-	client := rpc.NewClient(conn)
-	// TODO we make request to coord every time we detect failure
-	// this should receive updates on new head / tail, and can update d. struct accordingly
-	// TODO head/tail failure detection and handling
-
-	// Get head server from coord
-	headReqArgs := ClientArgs{
-		ClientId:   clientId,
-		ClientAddr: localCoordIPPort,
-		KToken:     nil,
-	}
-	var headRes ClientRes
-	err = client.Call("Coord.GetHead", headReqArgs, &headRes)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get tail server from coord
-	tailReqArgs := ClientArgs{
-		ClientId:   clientId,
-		ClientAddr: localCoordIPPort,
-		KToken:     nil,
-	}
-	var tailRes ClientRes
-	err = client.Call("Coord.GetTail", tailReqArgs, &tailRes)
-	if err != nil {
-		return nil, err
-	}
+	err = contactCoord(d)
+	util.CheckErr(err, "Could not connect to coord node")
 
 	return d.NotifyCh, nil
 }
@@ -211,18 +188,19 @@ func (d *KVS) Get(tracer *tracing.Tracer, clientId string, key string) (uint32, 
 	trace.RecordAction(Get{clientId, localOpId, key})
 
 	// Send get to tail via RPC
-	conn := makeConnection(d.TailLocalIP, d.TailRemoteIP)
-	client := rpc.NewClient(conn)
-	defer client.Close()
 	getArgs := GetArgs{
 		ClientId:     clientId,
 		OpId:         localOpId,
 		Key:          key,
 		GToken:       trace.GenerateToken(),
-		ClientIPPort: d.TailLocalIP,
+		ClientIPPort: d.LocalTailAddr,
 	}
+	conn, client := makeClient(d)
+	d.InProgress[localOpId] = true
 	client.Go("Server.Get", getArgs, nil, nil)
+
 	// Result should be received from tail via d.GetResult()
+	go handleGetTimeout(d, localOpId, getArgs, conn, client)
 	return localOpId, nil
 }
 
@@ -240,20 +218,20 @@ func (d *KVS) Put(tracer *tracing.Tracer, clientId string, key string, value str
 	trace.RecordAction(Put{clientId, localOpId, key, value})
 
 	// Send put to head via RPC
-	conn := makeConnection(d.HeadLocalIP, d.HeadRemoteIP)
-	client := rpc.NewClient(conn)
-	defer client.Close()
 	putArgs := PutArgs{
 		ClientId:     clientId,
 		OpId:         localOpId,
 		Key:          key,
 		Value:        value,
 		GToken:       trace.GenerateToken(),
-		ClientIPPort: d.TailLocalIP,
+		ClientIPPort: d.LocalTailAddr,
 	}
+	conn, client := makeClient(d)
+	d.InProgress[localOpId] = true
 	client.Go("Server.Put", putArgs, nil, nil)
 
 	// Result should be received from tail via d.PutResult()
+	go handlePutTimeout(d, localOpId, putArgs, conn, client)
 	return localOpId, nil
 }
 
@@ -262,8 +240,8 @@ func (d *KVS) Put(tracer *tracing.Tracer, clientId string, key string, value str
 func (d *KVS) Stop() {
 	// pass tracer
 	d.KTrace.RecordAction(KvslibStop{d.ClientId})
-	err := d.CoordListener.Close()
-	util.CheckErr(err, "Could not close KVS coord listener")
+	err := d.Tracer.Close()
+	util.CheckErr(err, "Could not close KVS tracer")
 	err = d.HeadListener.Close()
 	util.CheckErr(err, "Could not close KVS head listener")
 	err = d.TailListener.Close()
@@ -283,6 +261,54 @@ func makeConnection(localAddr string, remoteAddr string) *net.TCPConn {
 	return conn
 }
 
+// Send head and tail requests to coordinator
+// TODO head/tail failure detection and handling
+// TODO what if head/tail requests are dropped by the network?
+func contactCoord(d *KVS) error {
+	conn := makeConnection(d.LocalCoordAddr, d.RemoteCoordAddr)
+	defer conn.Close()
+	client := rpc.NewClient(conn)
+	defer client.Close()
+	token := d.KTrace.GenerateToken()
+
+	// Request head server from coord
+	headReqArgs := ClientArgs{
+		ClientId:   d.ClientId,
+		ClientAddr: d.LocalCoordAddr,
+		KToken:     token,
+	}
+	var headRes ClientRes
+	d.KTrace.RecordAction(HeadReq{d.ClientId})
+	err := client.Call("Coord.GetHead", headReqArgs, &headRes)
+	if err != nil {
+		return err
+	}
+	d.RemoteHeadAddr = headRes.ServerAddr // Update global var
+	d.KTrace.RecordAction(HeadResRecvd{
+		ClientId: d.ClientId,
+		ServerId: headRes.ServerId,
+	})
+
+	// Request tail server from coord
+	tailReqArgs := ClientArgs{
+		ClientId:   d.ClientId,
+		ClientAddr: d.LocalCoordAddr,
+		KToken:     token,
+	}
+	var tailRes ClientRes
+	d.KTrace.RecordAction(TailReq{d.ClientId})
+	err = client.Call("Coord.GetTail", tailReqArgs, &tailRes)
+	if err != nil {
+		return err
+	}
+	d.RemoteTailAddr = tailRes.ServerAddr // Update global var
+	d.KTrace.RecordAction(TailResRecvd{
+		ClientId: d.ClientId,
+		ServerId: tailRes.ServerId,
+	})
+	return nil
+}
+
 // GetResult
 // Does not reply to callee!
 func (d *KVS) GetResult(args *GetResultArgs, _ *interface{}) error {
@@ -298,6 +324,7 @@ func (d *KVS) GetResult(args *GetResultArgs, _ *interface{}) error {
 		GId:    args.GId,
 		Result: args.Value,
 	}
+	delete(d.InProgress, args.OpId)
 	d.NotifyCh <- result
 	return nil
 }
@@ -316,6 +343,7 @@ func (d *KVS) PutResult(args *PutResultArgs, _ *interface{}) error {
 		GId:    args.GId,
 		Result: args.Value,
 	}
+	delete(d.InProgress, args.OpId)
 	d.NotifyCh <- result
 	return nil
 }
@@ -333,4 +361,47 @@ func startRPCListener(rpcListenAddr string) (*net.TCPListener, error) {
 	}
 	go rpc.Accept(listener)
 	return listener, nil
+}
+
+func makeClient(d *KVS) (*net.TCPConn, *rpc.Client) {
+	conn := makeConnection(d.LocalTailAddr, d.RemoteTailAddr)
+	client := rpc.NewClient(conn)
+	return conn, client
+}
+
+// handleGetTimeout Checks if a Get request may have timed out and responds accordingly
+func handleGetTimeout(d *KVS, opId uint32, getArgs GetArgs, conn *net.TCPConn, client *rpc.Client) {
+	for {
+		select {
+		case <-time.After(3 * time.Second):
+			if d.InProgress[opId] {
+				// opId is still in progress
+				err := contactCoord(d)
+				util.CheckErr(err, "Could not contact coord")
+				client.Go("Server.Get", getArgs, nil, nil)
+			} else {
+				client.Close()
+				conn.Close()
+				return
+			}
+		}
+	}
+}
+
+func handlePutTimeout(d *KVS, opId uint32, putArgs PutArgs, conn *net.TCPConn, client *rpc.Client) {
+	for {
+		select {
+		case <-time.After(3 * time.Second):
+			if d.InProgress[opId] {
+				// opId is still in progress
+				err := contactCoord(d)
+				util.CheckErr(err, "Could not contact coord")
+				client.Go("Server.Put", putArgs, nil, nil)
+			} else {
+				client.Close()
+				conn.Close()
+				return
+			}
+		}
+	}
 }
