@@ -166,7 +166,7 @@ func (d *KVS) Start(localTracer *tracing.Tracer, clientId string, coordIPPort st
 	// Connect to coord
 	conn := makeConnection(localCoordIPPort, coordIPPort)
 	client := rpc.NewClient(conn)
-	// TODO function that services calls from coord OR we make request to coord every time we detect failure
+	// TODO we make request to coord every time we detect failure
 	// this should receive updates on new head / tail, and can update d. struct accordingly
 	// TODO head/tail failure detection and handling
 
@@ -177,8 +177,7 @@ func (d *KVS) Start(localTracer *tracing.Tracer, clientId string, coordIPPort st
 		KToken:     nil,
 	}
 	var headRes ClientRes
-	// TODO sync method name with coord.go
-	err = client.Call("Coord.HeadRequest", headReqArgs, &headRes)
+	err = client.Call("Coord.GetHead", headReqArgs, &headRes)
 	if err != nil {
 		return nil, err
 	}
@@ -190,8 +189,7 @@ func (d *KVS) Start(localTracer *tracing.Tracer, clientId string, coordIPPort st
 		KToken:     nil,
 	}
 	var tailRes ClientRes
-	// TODO sync method name with coord.go
-	err = client.Call("Coord.TailRequest", tailReqArgs, &tailRes)
+	err = client.Call("Coord.GetTail", tailReqArgs, &tailRes)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +221,6 @@ func (d *KVS) Get(tracer *tracing.Tracer, clientId string, key string) (uint32, 
 		GToken:       trace.GenerateToken(),
 		ClientIPPort: d.TailLocalIP,
 	}
-	// TODO sync method name with server.go
 	client.Go("Server.Get", getArgs, nil, nil)
 	// Result should be received from tail via d.GetResult()
 	return localOpId, nil
@@ -254,7 +251,6 @@ func (d *KVS) Put(tracer *tracing.Tracer, clientId string, key string, value str
 		GToken:       trace.GenerateToken(),
 		ClientIPPort: d.TailLocalIP,
 	}
-	// TODO sync method name with server.go
 	client.Go("Server.Put", putArgs, nil, nil)
 
 	// Result should be received from tail via d.PutResult()
@@ -289,7 +285,7 @@ func makeConnection(localAddr string, remoteAddr string) *net.TCPConn {
 
 // GetResult
 // Does not reply to callee!
-func (d *KVS) GetResult(args *GetResultArgs, reply *interface{}) error {
+func (d *KVS) GetResult(args *GetResultArgs, _ *interface{}) error {
 	trace := d.Tracer.ReceiveToken(args.GToken)
 	trace.RecordAction(GetResultRecvd{
 		OpId:  args.OpId,
@@ -308,7 +304,7 @@ func (d *KVS) GetResult(args *GetResultArgs, reply *interface{}) error {
 
 // PutResult
 // Does not reply to callee!
-func (d *KVS) PutResult(args *PutResultArgs, reply *interface{}) error {
+func (d *KVS) PutResult(args *PutResultArgs, _ *interface{}) error {
 	trace := d.Tracer.ReceiveToken(args.GToken)
 	trace.RecordAction(PutResultRecvd{
 		OpId: args.OpId,
