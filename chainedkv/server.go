@@ -32,6 +32,13 @@ type ServerJoined struct {
 	ServerId uint8
 }
 
+type ReplaceServerArgs struct {
+	FailedServerId              uint8
+	ReplacementServerId         uint8
+	ReplacementServerListenAddr string
+	CToken                      tracing.TracingToken
+}
+
 type ServerFailRecvd struct {
 	FailedServerId uint8
 }
@@ -46,6 +53,12 @@ type NewFailoverPredecessor struct {
 
 type ServerFailHandled struct {
 	FailedServerId uint8
+}
+
+type ReplaceServerRes struct {
+	ServerId       uint8
+	FailedServerId uint8
+	CToken         tracing.TracingToken
 }
 
 type PutArgs struct {
@@ -198,6 +211,7 @@ type ServerJoinedRes struct {
 
 type Server struct {
 	mutex                 sync.Mutex
+	serverId              uint8
 	tracer                *tracing.Tracer
 	isHead                bool
 	isTail                bool
@@ -220,6 +234,8 @@ func NewServer() *Server {
 }
 
 func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serverServerAddr string, serverListenAddr string, clientListenAddr string, strace *tracing.Tracer) error {
+	s.serverId = serverId
+
 	// Initialize trace
 	s.tracer = strace
 	trace := strace.CreateTrace()
@@ -252,8 +268,6 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		if err != nil {
 			return err
 		}
-		defer predConn.Close()
-		defer predClient.Close()
 
 		nextServerJoiningArgs := &NextServerJoiningArgs{
 			NextServerId:         serverId,
@@ -265,6 +279,8 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		if err != nil {
 			return err
 		}
+		predClient.Close()
+		predConn.Close()
 		sToken = nextServerJoiningRes.SToken
 		s.store = nextServerJoiningRes.Store
 	}
@@ -350,19 +366,82 @@ func (s *Server) AddSuccessor(args *NextServerJoiningArgs, reply *NextServerJoin
 	trace := s.tracer.ReceiveToken(args.SToken)
 	trace.RecordAction(NextServerJoining{args.NextServerId})
 
-	s.isTail = false
-	s.successorListenAddr = args.NextServerListenAddr
-	succConn, succClient, err := establishRPCConnection(s.serverServerAddr, s.successorListenAddr)
+	err := s.updateSuccessorInfo(args.NextServerListenAddr)
 	if err != nil {
 		return err
 	}
-	s.succConn = succConn
-	s.succRPCClient = succClient
 
 	trace.RecordAction(NewJoinedSuccessor{args.NextServerId})
 	*reply = NextServerJoiningRes{
 		Store:  s.store,
 		SToken: trace.GenerateToken(),
+	}
+	return nil
+}
+
+func (s *Server) ReplacePredecessor(args *ReplaceServerArgs, reply *ReplaceServerRes) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	trace := s.tracer.ReceiveToken(args.CToken)
+	trace.RecordAction(ServerFailRecvd{args.FailedServerId})
+
+	s.predecessorListenAddr = args.ReplacementServerListenAddr
+	s.isHead = s.predecessorListenAddr == ""
+	trace.RecordAction(NewFailoverPredecessor{args.ReplacementServerId})
+
+	trace.RecordAction(ServerFailHandled{args.FailedServerId})
+	*reply = ReplaceServerRes{
+		ServerId:       s.serverId,
+		FailedServerId: args.FailedServerId,
+		CToken:         trace.GenerateToken(),
+	}
+	return nil
+}
+
+func (s *Server) ReplaceSuccessor(args *ReplaceServerArgs, reply *ReplaceServerRes) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	trace := s.tracer.ReceiveToken(args.CToken)
+	trace.RecordAction(ServerFailRecvd{args.FailedServerId})
+
+	err := s.updateSuccessorInfo(args.ReplacementServerListenAddr)
+	if err != nil {
+		return err
+	}
+	trace.RecordAction(NewFailoverSuccessor{args.ReplacementServerId})
+
+	trace.RecordAction(ServerFailHandled{args.FailedServerId})
+	*reply = ReplaceServerRes{
+		ServerId:       s.serverId,
+		FailedServerId: args.FailedServerId,
+		CToken:         trace.GenerateToken(),
+	}
+	return nil
+}
+
+// Ensure this is called while Server.mutex is locked
+func (s *Server) updateSuccessorInfo(successorListenAddr string) error {
+	// Not sure if this is a safe way to close connections
+	if s.succRPCClient != nil {
+		s.succRPCClient.Close()
+		s.succRPCClient = nil
+	}
+	if s.succConn != nil {
+		s.succConn.Close()
+		s.succConn = nil
+	}
+
+	s.successorListenAddr = successorListenAddr
+	s.isTail = s.successorListenAddr == ""
+	if !s.isTail {
+		succConn, succClient, err := establishRPCConnection(s.serverServerAddr, s.successorListenAddr)
+		if err != nil {
+			return err
+		}
+		s.succConn = succConn
+		s.succRPCClient = succClient
 	}
 	return nil
 }
