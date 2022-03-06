@@ -33,6 +33,15 @@ type PutResultRecvd struct {
 	Key  string
 }
 
+type PutArgs struct {
+	clientId     string
+	opId         uint32
+	key          string
+	value        string
+	gToken       tracing.TracingToken
+	clientIPPort string
+}
+
 type Get struct {
 	ClientId string
 	OpId     uint32
@@ -44,6 +53,14 @@ type GetResultRecvd struct {
 	GId   uint64
 	Key   string
 	Value string
+}
+
+type GetArgs struct {
+	clientId     string
+	opId         uint32
+	key          string
+	gToken       tracing.TracingToken
+	clientIPPort string
 }
 
 type HeadReq struct {
@@ -142,6 +159,8 @@ func (d *KVS) Get(tracer *tracing.Tracer, clientId string, key string) (uint32, 
 	trace := tracer.CreateTrace()
 	trace.RecordAction(get)
 
+	// TODO change receive object
+	// TODO wait on server poll to send result to client
 	err := client.Call("Get", get, &d.notifyCh)
 	if err != nil {
 		return 0, err
