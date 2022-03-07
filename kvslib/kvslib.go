@@ -269,7 +269,7 @@ func makeConnection(localAddr string, remoteAddr string) *net.TCPConn {
 	remoteTcpAddr, err := net.ResolveTCPAddr("tcp", remoteAddr)
 	util.CheckErr(err, "Could not resolve address: "+remoteAddr)
 	conn, err := net.DialTCP("tcp", localTcpAddr, remoteTcpAddr)
-	util.CheckErr(err, "Could not connect: "+localAddr+" and "+remoteAddr)
+	util.CheckErr(err, "Could not connect "+localAddr+" to "+remoteAddr)
 
 	return conn
 }
