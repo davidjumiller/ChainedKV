@@ -1,9 +1,9 @@
 package chainedkv
 
 import (
+	"github.com/DistributedClocks/tracing"
 	"net"
 	"net/rpc"
-	"github.com/DistributedClocks/tracing"
 )
 
 // Actions to be recorded by coord (as part of ctrace, ktrace, and strace):
@@ -72,54 +72,32 @@ type Tail struct {
 }
 
 type ClientArgs struct {
-	ClientId string
+	ClientId   string
 	ClientAddr string
-	KToken tracing.TracingToken
+	KToken     tracing.TracingToken
 }
 
 type ClientRes struct {
-	ServerId uint8
+	ServerId   uint8
 	ServerAddr string
-	KToken tracing.TracingToken
-}
-
-type ServerJoiningArgs struct {
-	serverId uint8
-	sToken tracing.TracingToken
-}
-
-type ServerJoiningRes struct {
-	tailServerListenAddr string
-	sToken tracing.TracingToken
-}
-
-type ServerJoinedArgs struct {
-	serverId         uint8
-	ackAddr          string
-	coordListenAddr  string // coord -> this server
-	serverListenAddr string // (caller) server -> this server
-	sToken           tracing.TracingToken
-}
-
-type ServerJoinedRes struct {
-	sToken tracing.TracingToken
+	KToken     tracing.TracingToken
 }
 
 type Coord struct {
 	// Coord state may go here
-	Tracer *tracing.Tracer
-	Trace *tracing.Trace
-	NumServers uint8
+	Tracer           *tracing.Tracer
+	Trace            *tracing.Trace
+	NumServers       uint8
 	AvailableServers uint8
-	AllJoined bool
-	Head ServerInfo
-	Tail ServerInfo
-	Chain [16]ServerInfo
+	AllJoined        bool
+	Head             ServerInfo
+	Tail             ServerInfo
+	Chain            [16]ServerInfo
 }
 
 type ServerInfo struct {
 	ServerAddr string
-	ServerId uint8
+	ServerId   uint8
 }
 
 func NewCoord() *Coord {
@@ -146,44 +124,41 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 	if err != nil {
 		return err
 	}
-	
+
 	rpc.Register(c)
 
 	go rpc.Accept(lnClient)
 	go rpc.Accept(lnServer)
 
-	for true {
-
-	}
-
 	return nil
 }
 
 func (c *Coord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoiningRes *ServerJoiningRes) error {
-	trace := c.Tracer.ReceiveToken(serverJoiningArgs.sToken)
+	trace := c.Tracer.ReceiveToken(serverJoiningArgs.SToken)
 	trace.RecordAction(ServerJoiningRecvd{
-		ServerId: serverJoiningArgs.serverId,
+		ServerId: serverJoiningArgs.ServerId,
 	})
 
 	// Simple blocking until its the servers turn to join (Poor Efficieny?)
-	for c.Tail.ServerId+1 != serverJoiningArgs.serverId {} 
+	for c.Tail.ServerId+1 != serverJoiningArgs.ServerId {
+	}
 
 	*serverJoiningRes = ServerJoiningRes{
-		tailServerListenAddr: c.Tail.ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
-		sToken: trace.GenerateToken(),
+		TailServerListenAddr: c.Tail.ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
+		SToken:               trace.GenerateToken(),
 	}
 	return nil
 }
 
 func (c *Coord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoinedRes) error {
-	trace := c.Tracer.ReceiveToken(serverJoinedArgs.sToken)
+	trace := c.Tracer.ReceiveToken(serverJoinedArgs.SToken)
 	trace.RecordAction(ServerJoinedRecvd{
-		ServerId: serverJoinedArgs.serverId,
+		ServerId: serverJoinedArgs.ServerId,
 	})
 
 	c.Chain[c.AvailableServers] = ServerInfo{
-		ServerAddr: serverJoinedArgs.serverListenAddr,
-		ServerId: serverJoinedArgs.serverId,
+		ServerAddr: serverJoinedArgs.ServerListenAddr,
+		ServerId:   serverJoinedArgs.ServerId,
 	}
 	c.AvailableServers++
 	traceChain := NewChain{Chain: []uint8{}}
@@ -218,7 +193,8 @@ func (c *Coord) GetHead(args *ClientArgs, headAddr *string) error {
 	trace.RecordAction(req)
 
 	// Simple blocking until all servers join (Poor Efficiency?)
-	for c.AllJoined == false {}
+	for c.AllJoined == false {
+	}
 
 	res := HeadRes{}
 	res.ClientId = args.ClientId
@@ -237,7 +213,8 @@ func (c *Coord) GetTail(args *ClientArgs, tailAddr *string) error {
 	trace.RecordAction(req)
 
 	// Simple blocking until all servers join (Poor Efficiency?)
-	for c.AllJoined == false {}
+	for c.AllJoined == false {
+	}
 
 	res := TailRes{}
 	res.ClientId = args.ClientId
