@@ -34,18 +34,19 @@ type PutResultRecvd struct {
 type PutArgs struct {
 	ClientId     string
 	OpId         uint32
+	GId          uint64
 	Key          string
 	Value        string
 	GToken       tracing.TracingToken
 	ClientIPPort string
 }
 
-type PutResultArgs struct {
+type PutRes struct {
 	OpId   uint32
 	GId    uint64
 	Key    string
-	GToken tracing.TracingToken
 	Value  string
+	PToken tracing.TracingToken
 }
 
 type Get struct {
@@ -69,7 +70,7 @@ type GetArgs struct {
 	ClientIPPort string
 }
 
-type GetResultArgs struct {
+type GetRes struct {
 	OpId   uint32
 	GId    uint64
 	Key    string
@@ -234,15 +235,18 @@ func (d *KVS) Put(tracer *tracing.Tracer, clientId string, key string, value str
 		ClientId:     clientId,
 		OpId:         localOpId,
 		Key:          key,
+		GId:          0,
 		Value:        value,
 		GToken:       trace.GenerateToken(),
 		ClientIPPort: d.LocalTailAddr, // Receives result from tail
 	}
 	conn, client := makeClient(d.LocalHeadAddr, d.RemoteHeadAddr)
 	d.RpcConduit.InProgress[localOpId] = time.Now()
-	client.Go("Server.Put", putArgs, nil, nil)
+	var gid uint64
+	client.Call("Server.Put", putArgs, &gid)
 
 	// Result should be received from tail via d.PutResult()
+	putArgs.GId = gid // Update gid in case of re-sends
 	go handlePutTimeout(d, localOpId, putArgs, conn, client)
 	return localOpId, nil
 }
@@ -322,7 +326,7 @@ func contactCoord(d *KVS) error {
 
 // GetResult Confirms that a Get succeeded
 // Does not reply to callee!
-func (rpcConduit *RpcConduit) GetResult(args *GetResultArgs, _ *interface{}) error {
+func (rpcConduit *RpcConduit) GetResult(args *GetRes, _ *interface{}) error {
 	trace := rpcConduit.Tracer.ReceiveToken(args.GToken)
 	trace.RecordAction(GetResultRecvd{
 		OpId:  args.OpId,
@@ -342,8 +346,8 @@ func (rpcConduit *RpcConduit) GetResult(args *GetResultArgs, _ *interface{}) err
 
 // PutResult Confirms that a Put succeeded
 // Does not reply to callee!
-func (rpcConduit *RpcConduit) PutResult(args *PutResultArgs, _ *interface{}) error {
-	trace := rpcConduit.Tracer.ReceiveToken(args.GToken)
+func (rpcConduit *RpcConduit) PutResult(args *PutRes, _ *interface{}) error {
+	trace := rpcConduit.Tracer.ReceiveToken(args.PToken)
 	trace.RecordAction(PutResultRecvd{
 		OpId: args.OpId,
 		GId:  args.GId,
