@@ -5,6 +5,7 @@ import (
 	"github.com/DistributedClocks/tracing"
 	"net"
 	"net/rpc"
+	"sync"
 	"time"
 )
 
@@ -139,6 +140,7 @@ type RpcConduit struct {
 	RTT        time.Duration
 	Tracer     *tracing.Tracer
 	InProgress map[uint32]time.Time // Map representing sent requests that haven't been responded to
+	Mutex      *sync.RWMutex
 }
 
 func NewKVS() *KVS {
@@ -159,13 +161,13 @@ func (d *KVS) Start(localTracer *tracing.Tracer, clientId string, coordIPPort st
 		Tracer:     localTracer,
 		NotifyCh:   make(NotifyChannel, chCapacity),
 		InProgress: make(map[uint32]time.Time),
+		Mutex:      new(sync.RWMutex),
 	}
 	d.NotifyCh = d.RpcConduit.NotifyCh
 	d.LocalCoordAddr = localCoordIPPort
 	d.RemoteCoordAddr = coordIPPort
 	d.LocalHeadAddr = localHeadServerIPPort
 	d.LocalTailAddr = localTailServerIPPort
-	d.OpId = 0
 
 	// Tracing
 	d.KTrace.RecordAction(KvslibStart{clientId})
@@ -209,10 +211,12 @@ func (d *KVS) Get(tracer *tracing.Tracer, clientId string, key string) (uint32, 
 		ClientIPPort: d.LocalTailAddr, // Receives result from tail
 	}
 	conn, client := makeClient(d.LocalTailAddr, d.RemoteTailAddr)
+	d.RpcConduit.Mutex.Lock()
 	d.RpcConduit.InProgress[localOpId] = time.Now()
+	d.RpcConduit.Mutex.Unlock()
 	client.Go("Server.Get", getArgs, nil, nil)
 
-	// Result should be received from tail via d.GetResult()
+	// Result should be received from tail via KVS.GetResult()
 	go handleGetTimeout(d, localOpId, getArgs, conn, client)
 	return localOpId, nil
 }
@@ -241,11 +245,16 @@ func (d *KVS) Put(tracer *tracing.Tracer, clientId string, key string, value str
 		ClientIPPort: d.LocalTailAddr, // Receives result from tail
 	}
 	conn, client := makeClient(d.LocalHeadAddr, d.RemoteHeadAddr)
+	d.RpcConduit.Mutex.Lock()
 	d.RpcConduit.InProgress[localOpId] = time.Now()
+	d.RpcConduit.Mutex.Unlock()
 	var gid uint64
-	client.Call("Server.Put", putArgs, &gid)
+	err := client.Call("Server.Put", putArgs, &gid)
+	if err != nil {
+		return 0, err
+	}
 
-	// Result should be received from tail via d.PutResult()
+	// Result should be received from tail via KVS.PutResult()
 	putArgs.GId = gid // Update gid in case of re-sends
 	go handlePutTimeout(d, localOpId, putArgs, conn, client)
 	return localOpId, nil
@@ -327,6 +336,13 @@ func contactCoord(d *KVS) error {
 // GetResult Confirms that a Get succeeded
 // Does not reply to callee!
 func (rpcConduit *RpcConduit) GetResult(args *GetRes, _ *interface{}) error {
+	rpcConduit.Mutex.RLock()
+	_, exists := rpcConduit.InProgress[args.OpId]
+	rpcConduit.Mutex.RUnlock()
+	if !exists {
+		// Do nothing
+		return nil
+	}
 	trace := rpcConduit.Tracer.ReceiveToken(args.GToken)
 	trace.RecordAction(GetResultRecvd{
 		OpId:  args.OpId,
@@ -339,7 +355,7 @@ func (rpcConduit *RpcConduit) GetResult(args *GetRes, _ *interface{}) error {
 		GId:    args.GId,
 		Result: args.Value,
 	}
-	updateRTT(rpcConduit, args.OpId)
+	updateInProgressAndRtt(rpcConduit, args.OpId)
 	rpcConduit.NotifyCh <- result
 	return nil
 }
@@ -347,6 +363,13 @@ func (rpcConduit *RpcConduit) GetResult(args *GetRes, _ *interface{}) error {
 // PutResult Confirms that a Put succeeded
 // Does not reply to callee!
 func (rpcConduit *RpcConduit) PutResult(args *PutRes, _ *interface{}) error {
+	rpcConduit.Mutex.RLock()
+	_, exists := rpcConduit.InProgress[args.OpId]
+	rpcConduit.Mutex.RUnlock()
+	if !exists {
+		// Do nothing
+		return nil
+	}
 	trace := rpcConduit.Tracer.ReceiveToken(args.PToken)
 	trace.RecordAction(PutResultRecvd{
 		OpId: args.OpId,
@@ -358,7 +381,7 @@ func (rpcConduit *RpcConduit) PutResult(args *PutRes, _ *interface{}) error {
 		GId:    args.GId,
 		Result: args.Value,
 	}
-	updateRTT(rpcConduit, args.OpId)
+	updateInProgressAndRtt(rpcConduit, args.OpId)
 	rpcConduit.NotifyCh <- result
 	return nil
 }
@@ -390,7 +413,9 @@ func handleGetTimeout(d *KVS, opId uint32, getArgs GetArgs, conn *net.TCPConn, c
 	for {
 		select {
 		case <-time.After(d.RpcConduit.RTT):
+			d.RpcConduit.Mutex.RLock()
 			_, exists := d.RpcConduit.InProgress[opId]
+			d.RpcConduit.Mutex.RUnlock()
 			if exists {
 				// opId is still in progress
 				err := contactCoord(d)
@@ -411,7 +436,9 @@ func handlePutTimeout(d *KVS, opId uint32, putArgs PutArgs, conn *net.TCPConn, c
 	for {
 		select {
 		case <-time.After(d.RpcConduit.RTT):
+			d.RpcConduit.Mutex.RLock()
 			_, exists := d.RpcConduit.InProgress[opId]
+			d.RpcConduit.Mutex.RUnlock()
 			if exists {
 				// opId is still in progress
 				err := contactCoord(d)
@@ -428,8 +455,10 @@ func handlePutTimeout(d *KVS, opId uint32, putArgs PutArgs, conn *net.TCPConn, c
 }
 
 // Updates a KVS's estmated RTT based on an operation's RTT
-func updateRTT(rpcConduit *RpcConduit, opId uint32) {
+func updateInProgressAndRtt(rpcConduit *RpcConduit, opId uint32) {
+	rpcConduit.Mutex.Lock()
 	newRtt := time.Now().Sub(rpcConduit.InProgress[opId])
 	rpcConduit.RTT = (rpcConduit.RTT + newRtt) / 2
 	delete(rpcConduit.InProgress, opId)
+	rpcConduit.Mutex.Unlock()
 }
