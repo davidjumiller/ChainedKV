@@ -206,10 +206,6 @@ type ServerJoinedArgs struct {
 	SToken           tracing.TracingToken
 }
 
-type ServerJoinedRes struct {
-	SToken tracing.TracingToken
-}
-
 type Server struct {
 	mutex                 sync.Mutex
 	serverId              uint8
@@ -263,7 +259,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	s.predecessorListenAddr = serverJoiningRes.TailServerListenAddr
 	s.isHead = s.predecessorListenAddr == ""
 
-	// If I am not head, tell predecessor (previous tail) that I am new tail
+	// If s is not head, tell predecessor (previous tail) that I am new tail
 	if !s.isHead {
 		predConn, predClient, err := establishRPCConnection(serverServerAddr, s.predecessorListenAddr)
 		if err != nil {
@@ -306,7 +302,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		return err
 	}
 
-	// Notify coord that I have successfully joined
+	// Notify coord that s has successfully joined
 	trace.RecordAction(ServerJoined{serverId})
 	serverJoinedArgs := &ServerJoinedArgs{
 		ServerId:         serverId,
@@ -315,12 +311,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		ServerListenAddr: serverListenAddr,
 		SToken:           trace.GenerateToken(),
 	}
-	var serverJoinedRes ServerJoinedRes // TODO: maybe no response necessary?
-	err = cClient.Call("Coord.OnServerJoined", serverJoinedArgs, &serverJoinedRes)
-	if err != nil {
-		return err
-	}
-	trace = strace.ReceiveToken(serverJoinedRes.SToken)
+	cClient.Go("Coord.OnServerJoined", serverJoinedArgs, nil, nil)
 
 	return errors.New("not implemented")
 }
