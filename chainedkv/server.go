@@ -64,6 +64,7 @@ type ReplaceServerRes struct {
 type PutArgs struct {
 	ClientId     string
 	OpId         uint32
+	GId          uint64
 	Key          string
 	Value        string
 	ClientIPPort string
@@ -480,29 +481,42 @@ func (s *Server) Get(args *GetArgs, _ interface{}) error {
 	return nil
 }
 
-func (s *Server) Put(args *PutArgs, _ interface{}) error {
+func (s *Server) Put(args *PutArgs, gId *uint64) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	trace := s.tracer.ReceiveToken(args.PToken)
 	trace.RecordAction(PutRecvd{args.ClientId, args.OpId, args.Key, args.Value})
 
-	// 2^64 addresses ÷ (2^32 ops per client × 2^8 clients) = 2^24 addresses per op
-	// - head.Put() increments gId by 2^24
-	// - tail.Get() increments gId by 1
-	// - tail.PutFwd() sets gId to put.gId
-	// This avoids gId conflicts at the tail unless
-	//  the tail processes > 2^24 consecutive Gets followed by a Put
-	if s.isTail {
-		s.lastGId += 1
+	if args.GId == 0 {
+		// Put is a regular (non-resend) Put
+
+		// 2^64 addresses ÷ (2^32 ops per client × 2^8 clients) = 2^24 addresses per op
+		// - head.Put() increments gId by 2^24
+		// - tail.Get() increments gId by 1
+		// - tail.PutFwd() sets gId to put.gId
+		// This avoids gId conflicts at the tail unless
+		//  the tail processes > 2^24 consecutive Gets followed by a Put
+		if s.isTail {
+			s.lastGId += 1
+		} else {
+			s.lastGId += uint64(math.Pow(2, 24))
+		}
 	} else {
-		s.lastGId += uint64(math.Pow(2, 24))
+		// Put is a resend
+		if args.GId <= s.lastGId {
+			// Server has already seen this Put; ignore message
+			return nil
+		} else {
+			// Server has not seen this Put
+			s.lastGId = args.GId
+		}
 	}
-	gId := s.lastGId
-	trace.RecordAction(PutOrdered{args.ClientId, args.OpId, gId, args.Key, args.Value})
+	*gId = s.lastGId
+	trace.RecordAction(PutOrdered{args.ClientId, args.OpId, *gId, args.Key, args.Value})
 
 	s.store[args.Key] = args.Value
-	return s.fwdOrReturnPut(trace, args.ClientIPPort, args.ClientId, args.OpId, gId, args.Key, args.Value)
+	return s.fwdOrReturnPut(trace, args.ClientIPPort, args.ClientId, args.OpId, *gId, args.Key, args.Value)
 }
 
 func (s *Server) PutFwd(args *PutFwdArgs, _ interface{}) error {
@@ -512,6 +526,10 @@ func (s *Server) PutFwd(args *PutFwdArgs, _ interface{}) error {
 	trace := s.tracer.ReceiveToken(args.PToken)
 	trace.RecordAction(PutFwdRecvd{args.ClientId, args.OpId, args.GId, args.Key, args.Value})
 
+	if args.GId <= s.lastGId {
+		// Server has already seen this PutFwd; ignore message
+		return nil
+	}
 	s.lastGId = args.GId
 	s.store[args.Key] = args.Value
 	return s.fwdOrReturnPut(trace, args.ClientIPPort, args.ClientId, args.OpId, args.GId, args.Key, args.Value)
