@@ -220,13 +220,15 @@ type Server struct {
 	succConn              *net.TCPConn
 	succRPCClient         *rpc.Client // maintains RPC client for successor to use for PutFwd
 	store                 map[string]string
+	lastClientPuts        map[string]uint32
 }
 
 func NewServer() *Server {
 	return &Server{
-		isHead: false,
-		isTail: true,
-		store:  make(map[string]string),
+		isHead:         false,
+		isTail:         true,
+		store:          make(map[string]string),
+		lastClientPuts: make(map[string]uint32),
 	}
 }
 
@@ -505,10 +507,7 @@ func (s *Server) Put(args *PutArgs, gId *uint64) error {
 		}
 	} else {
 		// Put is a resend
-		if args.GId <= s.lastGId {
-			// Server has already seen this Put; ignore message
-			return nil
-		} else {
+		if args.GId > s.lastGId {
 			// Server has not seen this Put
 			s.lastGId = args.GId
 		}
@@ -516,7 +515,11 @@ func (s *Server) Put(args *PutArgs, gId *uint64) error {
 	*gId = s.lastGId
 	trace.RecordAction(PutOrdered{args.ClientId, args.OpId, *gId, args.Key, args.Value})
 
-	s.store[args.Key] = args.Value
+	// Update value at key only if server has not seen this Put from this client
+	if args.OpId > s.lastClientPuts[args.ClientId] {
+		s.store[args.Key] = args.Value
+		s.lastClientPuts[args.ClientId] = args.OpId
+	}
 	return s.fwdOrReturnPut(trace, args.ClientIPPort, args.ClientId, args.OpId, *gId, args.Key, args.Value)
 }
 
@@ -527,12 +530,14 @@ func (s *Server) PutFwd(args *PutFwdArgs, _ interface{}) error {
 	trace := s.tracer.ReceiveToken(args.PToken)
 	trace.RecordAction(PutFwdRecvd{args.ClientId, args.OpId, args.GId, args.Key, args.Value})
 
-	if args.GId <= s.lastGId {
-		// Server has already seen this PutFwd; ignore message
-		return nil
+	if args.GId > s.lastGId {
+		s.lastGId = args.GId
 	}
-	s.lastGId = args.GId
-	s.store[args.Key] = args.Value
+	// Update value at key only if server has not seen this Put from this client
+	if args.OpId > s.lastClientPuts[args.ClientId] {
+		s.store[args.Key] = args.Value
+		s.lastClientPuts[args.ClientId] = args.OpId
+	}
 	return s.fwdOrReturnPut(trace, args.ClientIPPort, args.ClientId, args.OpId, args.GId, args.Key, args.Value)
 }
 
