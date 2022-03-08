@@ -380,7 +380,10 @@ func (s *Server) ReplacePredecessor(args *ReplaceServerArgs, reply *ReplaceServe
 
 	s.predecessorListenAddr = args.ReplacementServerListenAddr
 	s.isHead = s.predecessorListenAddr == ""
-	trace.RecordAction(NewFailoverPredecessor{args.ReplacementServerId})
+	if !s.isHead {
+		// Only record NewFailoverPredecessor if a new predecessor exists
+		trace.RecordAction(NewFailoverPredecessor{args.ReplacementServerId})
+	}
 
 	trace.RecordAction(ServerFailHandled{args.FailedServerId})
 	*reply = ReplaceServerRes{
@@ -402,7 +405,14 @@ func (s *Server) ReplaceSuccessor(args *ReplaceServerArgs, reply *ReplaceServerR
 	if err != nil {
 		return err
 	}
-	trace.RecordAction(NewFailoverSuccessor{args.ReplacementServerId})
+	if s.isTail {
+		// Increment lastGId to account for Gets potentially lost at old tail
+		s.lastGId += uint64(math.Pow(2, 24))
+	}
+	if !s.isTail {
+		// Only record NewFailoverSuccessor if a new successor exists
+		trace.RecordAction(NewFailoverSuccessor{args.ReplacementServerId})
+	}
 
 	trace.RecordAction(ServerFailHandled{args.FailedServerId})
 	*reply = ReplaceServerRes{
@@ -415,7 +425,7 @@ func (s *Server) ReplaceSuccessor(args *ReplaceServerArgs, reply *ReplaceServerR
 
 // Ensure this is called while Server.mutex is locked
 func (s *Server) updateSuccessorInfo(successorListenAddr string) error {
-	// Not sure if this is a safe way to close connections
+	// Not sure if this is the best way to close connections
 	if s.succRPCClient != nil {
 		s.succRPCClient.Close()
 		s.succRPCClient = nil
