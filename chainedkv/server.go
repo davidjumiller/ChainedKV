@@ -206,10 +206,6 @@ type ServerJoinedArgs struct {
 	SToken           tracing.TracingToken
 }
 
-type ServerJoinedRes struct {
-	SToken tracing.TracingToken
-}
-
 type Server struct {
 	mutex                 sync.Mutex
 	serverId              uint8
@@ -224,13 +220,15 @@ type Server struct {
 	succConn              *net.TCPConn
 	succRPCClient         *rpc.Client // maintains RPC client for successor to use for PutFwd
 	store                 map[string]string
+	lastClientPuts        map[string]uint32
 }
 
 func NewServer() *Server {
 	return &Server{
-		isHead: false,
-		isTail: true,
-		store:  make(map[string]string),
+		isHead:         false,
+		isTail:         true,
+		store:          make(map[string]string),
+		lastClientPuts: make(map[string]uint32),
 	}
 }
 
@@ -263,7 +261,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	s.predecessorListenAddr = serverJoiningRes.TailServerListenAddr
 	s.isHead = s.predecessorListenAddr == ""
 
-	// If I am not head, tell predecessor (previous tail) that I am new tail
+	// If s is not head, tell predecessor (previous tail) that I am new tail
 	if !s.isHead {
 		predConn, predClient, err := establishRPCConnection(serverServerAddr, s.predecessorListenAddr)
 		if err != nil {
@@ -306,7 +304,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		return err
 	}
 
-	// Notify coord that I have successfully joined
+	// Notify coord that s has successfully joined
 	trace.RecordAction(ServerJoined{serverId})
 	serverJoinedArgs := &ServerJoinedArgs{
 		ServerId:         serverId,
@@ -315,12 +313,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		ServerListenAddr: serverListenAddr,
 		SToken:           trace.GenerateToken(),
 	}
-	var serverJoinedRes ServerJoinedRes // TODO: maybe no response necessary?
-	err = cClient.Call("Coord.OnServerJoined", serverJoinedArgs, &serverJoinedRes)
-	if err != nil {
-		return err
-	}
-	trace = strace.ReceiveToken(serverJoinedRes.SToken)
+	cClient.Go("Coord.OnServerJoined", serverJoinedArgs, nil, nil)
 
 	return errors.New("not implemented")
 }
@@ -389,7 +382,10 @@ func (s *Server) ReplacePredecessor(args *ReplaceServerArgs, reply *ReplaceServe
 
 	s.predecessorListenAddr = args.ReplacementServerListenAddr
 	s.isHead = s.predecessorListenAddr == ""
-	trace.RecordAction(NewFailoverPredecessor{args.ReplacementServerId})
+	if !s.isHead {
+		// Only record NewFailoverPredecessor if a new predecessor exists
+		trace.RecordAction(NewFailoverPredecessor{args.ReplacementServerId})
+	}
 
 	trace.RecordAction(ServerFailHandled{args.FailedServerId})
 	*reply = ReplaceServerRes{
@@ -411,7 +407,14 @@ func (s *Server) ReplaceSuccessor(args *ReplaceServerArgs, reply *ReplaceServerR
 	if err != nil {
 		return err
 	}
-	trace.RecordAction(NewFailoverSuccessor{args.ReplacementServerId})
+	if s.isTail {
+		// Increment lastGId to account for Gets potentially lost at old tail
+		s.lastGId += uint64(math.Pow(2, 24))
+	}
+	if !s.isTail {
+		// Only record NewFailoverSuccessor if a new successor exists
+		trace.RecordAction(NewFailoverSuccessor{args.ReplacementServerId})
+	}
 
 	trace.RecordAction(ServerFailHandled{args.FailedServerId})
 	*reply = ReplaceServerRes{
@@ -424,7 +427,7 @@ func (s *Server) ReplaceSuccessor(args *ReplaceServerArgs, reply *ReplaceServerR
 
 // Ensure this is called while Server.mutex is locked
 func (s *Server) updateSuccessorInfo(successorListenAddr string) error {
-	// Not sure if this is a safe way to close connections
+	// Not sure if this is the best way to close connections
 	if s.succRPCClient != nil {
 		s.succRPCClient.Close()
 		s.succRPCClient = nil
@@ -504,10 +507,7 @@ func (s *Server) Put(args *PutArgs, gId *uint64) error {
 		}
 	} else {
 		// Put is a resend
-		if args.GId <= s.lastGId {
-			// Server has already seen this Put; ignore message
-			return nil
-		} else {
+		if args.GId > s.lastGId {
 			// Server has not seen this Put
 			s.lastGId = args.GId
 		}
@@ -515,7 +515,11 @@ func (s *Server) Put(args *PutArgs, gId *uint64) error {
 	*gId = s.lastGId
 	trace.RecordAction(PutOrdered{args.ClientId, args.OpId, *gId, args.Key, args.Value})
 
-	s.store[args.Key] = args.Value
+	// Update value at key only if server has not seen this Put from this client
+	if args.OpId > s.lastClientPuts[args.ClientId] {
+		s.store[args.Key] = args.Value
+		s.lastClientPuts[args.ClientId] = args.OpId
+	}
 	return s.fwdOrReturnPut(trace, args.ClientIPPort, args.ClientId, args.OpId, *gId, args.Key, args.Value)
 }
 
@@ -526,12 +530,14 @@ func (s *Server) PutFwd(args *PutFwdArgs, _ interface{}) error {
 	trace := s.tracer.ReceiveToken(args.PToken)
 	trace.RecordAction(PutFwdRecvd{args.ClientId, args.OpId, args.GId, args.Key, args.Value})
 
-	if args.GId <= s.lastGId {
-		// Server has already seen this PutFwd; ignore message
-		return nil
+	if args.GId > s.lastGId {
+		s.lastGId = args.GId
 	}
-	s.lastGId = args.GId
-	s.store[args.Key] = args.Value
+	// Update value at key only if server has not seen this Put from this client
+	if args.OpId > s.lastClientPuts[args.ClientId] {
+		s.store[args.Key] = args.Value
+		s.lastClientPuts[args.ClientId] = args.OpId
+	}
 	return s.fwdOrReturnPut(trace, args.ClientIPPort, args.ClientId, args.OpId, args.GId, args.Key, args.Value)
 }
 
