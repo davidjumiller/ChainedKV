@@ -216,7 +216,7 @@ func (d *KVS) Get(tracer *tracing.Tracer, clientId string, key string) (uint32, 
 
 		if numOutstanding > 0 {
 			// Outstanding put(s); buffer for later
-			getArgs := d.createGetArgs(clientId, key, localOpId)
+			getArgs := d.createGetArgs(tracer, clientId, key, localOpId)
 			d.RemoteKVS.BufferedGets[key].PushBack(getArgs)
 			return localOpId, nil
 		}
@@ -229,7 +229,7 @@ func (d *KVS) Get(tracer *tracing.Tracer, clientId string, key string) (uint32, 
 			d.RemoteKVS.UpperOpId = (uint32(math.Pow(2, 32)) - d.RemoteKVS.LowerOpId) / 2
 		}
 	}
-	getArgs := d.createGetArgs(clientId, key, localOpId)
+	getArgs := d.createGetArgs(tracer, clientId, key, localOpId)
 	d.sendGet(getArgs)
 	return localOpId, nil
 
@@ -496,8 +496,8 @@ func (remoteKVS *RemoteKVS) updateInProgressAndRtt(opId uint32) {
 }
 
 // Creates GetArgs struct for a new Get
-func (d *KVS) createGetArgs(clientId string, key string, localOpId uint32) GetArgs {
-	trace := d.RemoteKVS.Tracer.CreateTrace()
+func (d *KVS) createGetArgs(tracer *tracing.Tracer, clientId string, key string, localOpId uint32) GetArgs {
+	trace := tracer.CreateTrace()
 	getArgs := GetArgs{
 		ClientId:     clientId,
 		OpId:         localOpId,
