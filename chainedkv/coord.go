@@ -130,6 +130,10 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 	go rpc.Accept(lnClient)
 	go rpc.Accept(lnServer)
 
+	for true {
+
+	}
+
 	return nil
 }
 
@@ -150,7 +154,7 @@ func (c *Coord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoin
 	return nil
 }
 
-func (c *Coord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoinedRes) error {
+func (c *Coord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoiningRes) error {
 	trace := c.Tracer.ReceiveToken(serverJoinedArgs.SToken)
 	trace.RecordAction(ServerJoinedRecvd{
 		ServerId: serverJoinedArgs.ServerId,
