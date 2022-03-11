@@ -1,6 +1,7 @@
 package chainedkv
 
 import (
+	fchecker "cs.ubc.ca/cpsc416/a3/fcheck"
 	"net"
 	"net/rpc"
 	"github.com/DistributedClocks/tracing"
@@ -83,38 +84,15 @@ type ClientRes struct {
 	KToken tracing.TracingToken
 }
 
-type ServerJoiningArgs struct {
-	serverId uint8
-	sToken tracing.TracingToken
-}
-
-type ServerJoiningRes struct {
-	tailServerListenAddr string
-	sToken tracing.TracingToken
-}
-
-type ServerJoinedArgs struct {
-	serverId         uint8
-	ackAddr          string
-	coordListenAddr  string // coord -> this server
-	serverListenAddr string // (caller) server -> this server
-	sToken           tracing.TracingToken
-}
-
-type ServerJoinedRes struct {
-	sToken tracing.TracingToken
-}
-
 type Coord struct {
 	// Coord state may go here
 	Tracer *tracing.Tracer
 	Trace *tracing.Trace
+	lostMsgsThresh uint8
 	NumServers uint8
 	AvailableServers uint8
 	AllJoined bool
-	Head ServerInfo
-	Tail ServerInfo
-	Chain [16]ServerInfo
+	Chain []ServerInfo
 }
 
 type ServerInfo struct {
@@ -123,7 +101,9 @@ type ServerInfo struct {
 }
 
 func NewCoord() *Coord {
-	return &Coord{}
+	return &Coord{
+		Chain: []ServerInfo{},
+	}
 }
 
 func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lostMsgsThresh uint8, numServers uint8, ctrace *tracing.Tracer) error {
@@ -137,6 +117,7 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 	c.AvailableServers = 0
 	c.NumServers = numServers
 	c.AllJoined = false
+	c.lostMsgsThresh = lostMsgsThresh
 
 	lnClient, err := net.Listen("tcp", clientAPIListenAddr)
 	if err != nil {
@@ -165,11 +146,13 @@ func (c *Coord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoin
 		ServerId: serverJoiningArgs.serverId,
 	})
 
+	tail := c.Chain[c.AvailableServers]
+
 	// Simple blocking until its the servers turn to join (Poor Efficieny?)
-	for c.Tail.ServerId+1 != serverJoiningArgs.serverId {} 
+	for tail.ServerId+1 != serverJoiningArgs.serverId {} 
 
 	*serverJoiningRes = ServerJoiningRes{
-		tailServerListenAddr: c.Tail.ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
+		tailServerListenAddr: tail.ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
 		sToken: trace.GenerateToken(),
 	}
 	return nil
@@ -181,10 +164,12 @@ func (c *Coord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *Se
 		ServerId: serverJoinedArgs.serverId,
 	})
 
-	c.Chain[c.AvailableServers] = ServerInfo{
+	serverInfo := ServerInfo{
 		ServerAddr: serverJoinedArgs.serverListenAddr,
 		ServerId: serverJoinedArgs.serverId,
 	}
+	c.Chain[c.AvailableServers] = serverInfo
+
 	c.AvailableServers++
 	traceChain := NewChain{Chain: []uint8{}}
 	for i := range c.Chain {
@@ -201,12 +186,25 @@ func (c *Coord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *Se
 
 	// TODO: Start running fcheck (async) on this new server (new UDP connection)
 	// TODO: On failure, run c.OnServerFailure(failedServer)
+	startStruct := fchecker.StartStruct {
+		AckLocalIPAckLocalPort: "Temp",
+		EpochNonce: 1,
+		HBeatLocalIPHBeatLocalPort: "Temp",
+		HBeatRemoteIPHBeatRemotePort: "Temp",
+		LostMsgThresh: c.lostMsgsThresh,
+	}
+	fcheckChan, err := fchecker.Start(startStruct)
+	if err != nil {
+		return err // Log failure?
+	}
+	
+	go c.OnServerFailure(serverInfo, fcheckChan)
 
 	return nil
 }
 
-func (c *Coord) OnServerFailure(failedServer ServerInfo) {
-	// TODO: Remove server from the chain
+func (c *Coord) OnServerFailure(failedServer ServerInfo, failReport <-chan fchecker.FailureDetected) {
+	// TODO: Create new chain with server removed
 	// TODO: RPC servers that need to change their prev/next
 }
 
@@ -222,10 +220,10 @@ func (c *Coord) GetHead(args *ClientArgs, headAddr *string) error {
 
 	res := HeadRes{}
 	res.ClientId = args.ClientId
-	res.ServerId = c.Head.ServerId
+	res.ServerId = c.Chain[0].ServerId
 	trace.RecordAction(res)
 
-	*headAddr = c.Head.ServerAddr
+	*headAddr = c.Chain[0].ServerAddr
 	return nil
 }
 
@@ -241,9 +239,9 @@ func (c *Coord) GetTail(args *ClientArgs, tailAddr *string) error {
 
 	res := TailRes{}
 	res.ClientId = args.ClientId
-	res.ServerId = c.Tail.ServerId
+	res.ServerId = c.Chain[c.AvailableServers-1].ServerId
 	trace.RecordAction(res)
 
-	*tailAddr = c.Tail.ServerAddr
+	*tailAddr = c.Chain[c.AvailableServers-1].ServerAddr
 	return nil
 }
