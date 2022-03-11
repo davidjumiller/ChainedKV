@@ -1,11 +1,11 @@
 {
   "ClientID": "client1",
-  "CoordIPPort": "0.0.0.0:12347",
-  "LocalCoordIPPort": "0.0.0.0:12357",
-  "LocalHeadServerIPPort": "0.0.0.0:12367",
-  "LocalTailServerIPPort": "0.0.0.0:12377",
+  "CoordIPPort": "0.0.0.0:1234",
+  "LocalCoordIPPort": "0.0.0.0:1235",
+  "LocalHeadServerIPPort": "0.0.0.0:1236",
+  "LocalTailServerIPPort": "0.0.0.0:1237",
   "ChCapacity": 1,
-  "TracingServerAddr": ":66667",
+  "TracingServerAddr": ":6666",
   "Secret": "",
   "TracingIdentity": "client1"
 }
