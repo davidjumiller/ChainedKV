@@ -6,10 +6,7 @@ import (
 	"net/rpc"
 	"fmt"
 	"math/rand"
-	"cs.ubc.ca/cpsc416/a3/util"
 	"github.com/DistributedClocks/tracing"
-	"net"
-	"net/rpc"
 )
 
 // Actions to be recorded by coord (as part of ctrace, ktrace, and strace):
