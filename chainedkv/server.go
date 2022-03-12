@@ -437,7 +437,8 @@ func (remoteServer *RemoteServer) ReplacePredecessor(args *ReplaceServerArgs, re
 	return nil
 }
 
-func (s *Server) ReplaceSuccessor(args *ReplaceServerArgs, reply *ReplaceServerRes) error {
+func (remoteServer *RemoteServer) ReplaceSuccessor(args *ReplaceServerArgs, reply *ReplaceServerRes) error {
+	s := remoteServer.Server
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
