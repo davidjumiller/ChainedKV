@@ -473,7 +473,7 @@ func (s *Server) updateSuccessorInfo(successorListenAddr string) error {
 	return nil
 }
 
-func (remoteServer *RemoteServer) Get(args *GetArgs, _ interface{}) error {
+func (remoteServer *RemoteServer) Get(args *GetArgs, _ *interface{}) error {
 	s := remoteServer.Server
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -548,7 +548,7 @@ func (remoteServer *RemoteServer) Put(args *PutArgs, gId *uint64) error {
 	return s.fwdOrReturnPut(trace, args.ClientIPPort, args.ClientId, args.OpId, *gId, args.Key, args.Value)
 }
 
-func (remoteServer *RemoteServer) PutFwd(args *PutFwdArgs, _ interface{}) error {
+func (remoteServer *RemoteServer) PutFwd(args *PutFwdArgs, _ *interface{}) error {
 	s := remoteServer.Server
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

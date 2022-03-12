@@ -1,6 +1,8 @@
 package chainedkv
 
 import (
+	"cs.ubc.ca/cpsc416/a3/util"
+	"fmt"
 	"github.com/DistributedClocks/tracing"
 	"net"
 	"net/rpc"
@@ -126,12 +128,18 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 	c.NumServers = numServers
 	c.AllJoined = false
 
-	lnClient, err := net.Listen("tcp", clientAPIListenAddr)
+	clientTcpAddr, err := net.ResolveTCPAddr("tcp", clientAPIListenAddr)
+	util.CheckErr(err, "Couldn't resolve client listening address in coord")
+	lnClient, err := net.ListenTCP("tcp", clientTcpAddr)
 	if err != nil {
+		fmt.Println(err)
 		return err
 	}
-	lnServer, err := net.Listen("tcp", serverAPIListenAddr)
+	serverTcpAddr, err := net.ResolveTCPAddr("tcp", serverAPIListenAddr)
+	util.CheckErr(err, "Couldn't resolve server listening address in coord")
+	lnServer, err := net.ListenTCP("tcp", serverTcpAddr)
 	if err != nil {
+		fmt.Println(err)
 		return err
 	}
 
@@ -153,8 +161,6 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 	return nil
 }
 
-// TODO not accepting client connections...
-
 func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoiningRes *ServerJoiningRes) error {
 	c := remoteCoord.Coord
 	trace := c.Tracer.ReceiveToken(serverJoiningArgs.SToken)
@@ -170,6 +176,7 @@ func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoining
 		TailServerListenAddr: c.Tail.ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
 		SToken:               trace.GenerateToken(),
 	}
+	fmt.Println("Joining for", serverJoiningArgs.ServerId)
 	return nil
 }
 
@@ -185,6 +192,7 @@ func (remoteCoord *RemoteCoord) OnJoined(serverJoinedArgs *ServerJoinedArgs, ser
 		ServerId:   serverJoinedArgs.ServerId,
 	}
 	c.AvailableServers++
+	fmt.Println("We have", c.AvailableServers, "available servers")
 	traceChain := NewChain{Chain: []uint8{}}
 	for i := range c.Chain {
 		traceChain.Chain = append(traceChain.Chain, c.Chain[i].ServerId)
@@ -209,7 +217,7 @@ func (c *Coord) OnServerFailure(failedServer ServerInfo) {
 	// TODO: RPC servers that need to change their prev/next
 }
 
-func (remoteCoord *RemoteCoord) GetHead(args *ClientArgs, headAddr *string) error {
+func (remoteCoord *RemoteCoord) GetHead(args *ClientArgs, headRes *ClientRes) error {
 	c := remoteCoord.Coord
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := HeadReqRecvd{
@@ -226,11 +234,16 @@ func (remoteCoord *RemoteCoord) GetHead(args *ClientArgs, headAddr *string) erro
 	res.ServerId = c.Head.ServerId
 	trace.RecordAction(res)
 
-	*headAddr = c.Head.ServerAddr
+	*headRes = ClientRes{
+		ServerId:   c.Tail.ServerId,
+		ServerAddr: c.Tail.ServerAddr,
+		KToken:     args.KToken,
+	}
+	fmt.Println("Ending headreq")
 	return nil
 }
 
-func (remoteCoord *RemoteCoord) GetTail(args *ClientArgs, tailAddr *string) error {
+func (remoteCoord *RemoteCoord) GetTail(args *ClientArgs, tailRes *ClientRes) error {
 	c := remoteCoord.Coord
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := TailReqRecvd{
@@ -247,6 +260,10 @@ func (remoteCoord *RemoteCoord) GetTail(args *ClientArgs, tailAddr *string) erro
 	res.ServerId = c.Tail.ServerId
 	trace.RecordAction(res)
 
-	*tailAddr = c.Tail.ServerAddr
+	*tailRes = ClientRes{
+		ServerId:   c.Tail.ServerId,
+		ServerAddr: c.Tail.ServerAddr,
+		KToken:     args.KToken,
+	}
 	return nil
 }

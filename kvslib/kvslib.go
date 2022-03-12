@@ -98,6 +98,16 @@ type ClientRes struct {
 	KToken     tracing.TracingToken
 }
 
+type HeadRes struct {
+	ClientId string
+	ServerId uint8
+}
+
+type TailRes struct {
+	ClientId string
+	ServerId uint8
+}
+
 type HeadReq struct {
 	ClientId string
 }
@@ -214,7 +224,7 @@ func (d *KVS) Start(localTracer *tracing.Tracer, clientId string, coordIPPort st
 
 	// Connect to coord
 	err = d.contactCoord()
-	util.CheckErr(err, "Could not connect to coord node")
+	util.CheckErr(err, "Could not connect to coord node", err)
 
 	return d.NotifyCh, nil
 }
@@ -348,7 +358,7 @@ func (d *KVS) contactCoord() error {
 	token := d.KTrace.GenerateToken()
 
 	// Request head server from coord
-	headReqArgs := ClientArgs{
+	headReqArgs := &ClientArgs{
 		ClientId:   d.ClientId,
 		ClientAddr: d.LocalCoordAddr,
 		KToken:     token,
