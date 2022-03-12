@@ -137,7 +137,9 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 		return err
 	}
 	
-	rpc.Register(c)
+	rc := NewRemoteCoord()
+	rc.Coord = c
+	rpc.Register(rc)
 
 	go rpc.Accept(lnClient)
 	go rpc.Accept(lnServer)
@@ -153,7 +155,7 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoiningRes *ServerJoiningRes) error {
 	c := remoteCoord.Coord
 
-  // Tracing: ServerJoiningRecvd
+  	// Tracing: ServerJoiningRecvd
 	trace := c.Tracer.ReceiveToken(serverJoiningArgs.SToken)
 	trace.RecordAction(ServerJoiningRecvd{
 		ServerId: serverJoiningArgs.ServerId,
@@ -174,7 +176,7 @@ func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoining
 func (remoteCoord *RemoteCoord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoiningRes) error {
 	c := remoteCoord.Coord
 
-  // Tracing: ServerJoinedRecvd
+  	// Tracing: ServerJoinedRecvd
 	trace := c.Tracer.ReceiveToken(serverJoinedArgs.SToken)
 	trace.RecordAction(ServerJoinedRecvd{
 		ServerId: serverJoinedArgs.ServerId,
@@ -186,9 +188,9 @@ func (remoteCoord *RemoteCoord) OnJoined(serverJoinedArgs *ServerJoinedArgs, ser
 		ServerAddr: serverJoinedArgs.ServerListenAddr,
 		ServerId:   serverJoinedArgs.ServerId,
 	}
-  c.Chain = append(c.Chain, serverInfo)
+  	c.Chain = append(c.Chain, serverInfo)
 	c.AvailableServers++
-  fmt.Println("We have", c.AvailableServers, "available servers")
+  	fmt.Println("We have", c.AvailableServers, "available servers")
   
 	// Tracing: NewChain
 	traceChain := NewChain{Chain: []uint8{}}
