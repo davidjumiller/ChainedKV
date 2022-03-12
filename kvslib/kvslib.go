@@ -82,7 +82,7 @@ type GetRes struct {
 }
 
 type BufferedGet struct {
-	Args    GetArgs
+	Args    *GetArgs
 	PutOpId uint32
 }
 
@@ -96,6 +96,16 @@ type ClientRes struct {
 	ServerId   uint8
 	ServerAddr string
 	KToken     tracing.TracingToken
+}
+
+type HeadRes struct {
+	ClientId string
+	ServerId uint8
+}
+
+type TailRes struct {
+	ClientId string
+	ServerId uint8
 }
 
 type HeadReq struct {
@@ -196,14 +206,14 @@ func (d *KVS) Start(localTracer *tracing.Tracer, clientId string, coordIPPort st
 	d.LocalTailAddr = localTailServerIPPort
 	d.Tracer = localTracer
 
-	r := NewRemoteKVS()
-	r.KVS = d
+	remote := NewRemoteKVS()
+	remote.KVS = d
 
 	// Tracing
 	d.KTrace.RecordAction(KvslibStart{clientId})
 
 	// Setup RPC
-	err := rpc.RegisterName("KVS", r)
+	err := rpc.RegisterName("KVS", remote)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +224,7 @@ func (d *KVS) Start(localTracer *tracing.Tracer, clientId string, coordIPPort st
 
 	// Connect to coord
 	err = d.contactCoord()
-	util.CheckErr(err, "Could not connect to coord node")
+	util.CheckErr(err, "Could not connect to coord node", err)
 
 	return d.NotifyCh, nil
 }
@@ -286,7 +296,7 @@ func (d *KVS) Put(tracer *tracing.Tracer, clientId string, key string, value str
 	trace.RecordAction(Put{clientId, localOpId, key, value})
 
 	// Send put to head via RPC
-	putArgs := PutArgs{
+	putArgs := &PutArgs{
 		ClientId:     clientId,
 		OpId:         localOpId,
 		Key:          key,
@@ -348,12 +358,16 @@ func (d *KVS) contactCoord() error {
 	token := d.KTrace.GenerateToken()
 
 	// Request head server from coord
-	headReqArgs := ClientArgs{
+	headReqArgs := &ClientArgs{
 		ClientId:   d.ClientId,
 		ClientAddr: d.LocalCoordAddr,
 		KToken:     token,
 	}
-	var headRes ClientRes
+	headRes := &ClientRes{
+		ServerId:   0,
+		ServerAddr: "",
+		KToken:     nil,
+	}
 	d.KTrace.RecordAction(HeadReq{d.ClientId})
 	err := client.Call("Coord.GetHead", headReqArgs, &headRes)
 	if err != nil {
@@ -366,7 +380,7 @@ func (d *KVS) contactCoord() error {
 	})
 
 	// Request tail server from coord
-	tailReqArgs := ClientArgs{
+	tailReqArgs := &ClientArgs{
 		ClientId:   d.ClientId,
 		ClientAddr: d.LocalCoordAddr,
 		KToken:     token,
@@ -473,7 +487,7 @@ func makeClient(localAddr string, remoteAddr string) (*net.TCPConn, *rpc.Client)
 }
 
 // Checks if a Get request may have been interrupted due to server failure and responds accordingly
-func handleGetTimeout(d *KVS, getArgs GetArgs, conn *net.TCPConn, client *rpc.Client) {
+func handleGetTimeout(d *KVS, getArgs *GetArgs, conn *net.TCPConn, client *rpc.Client) {
 	for {
 		select {
 		case <-d.AliveCh:
@@ -498,7 +512,7 @@ func handleGetTimeout(d *KVS, getArgs GetArgs, conn *net.TCPConn, client *rpc.Cl
 }
 
 // Checks if a Put request may have been interrupted due to server failure and responds accordingly
-func handlePutTimeout(d *KVS, gId uint64, putArgs PutArgs, conn *net.TCPConn, client *rpc.Client) {
+func handlePutTimeout(d *KVS, gId uint64, putArgs *PutArgs, conn *net.TCPConn, client *rpc.Client) {
 	for {
 		select {
 		case <-d.AliveCh:
@@ -535,9 +549,9 @@ func (remoteKVS *RemoteKVS) updateInProgressAndRtt(opId uint32) {
 }
 
 // Creates GetArgs struct for a new Get
-func (d *KVS) createGetArgs(tracer *tracing.Tracer, clientId string, key string, localOpId uint32) GetArgs {
+func (d *KVS) createGetArgs(tracer *tracing.Tracer, clientId string, key string, localOpId uint32) *GetArgs {
 	trace := tracer.CreateTrace()
-	getArgs := GetArgs{
+	getArgs := &GetArgs{
 		ClientId:     clientId,
 		OpId:         localOpId,
 		Key:          key,
@@ -548,7 +562,7 @@ func (d *KVS) createGetArgs(tracer *tracing.Tracer, clientId string, key string,
 }
 
 // Sends a Get request to a server and prepares to receive the result
-func (d *KVS) sendGet(getArgs GetArgs) {
+func (d *KVS) sendGet(getArgs *GetArgs) {
 	// Send get to tail via RPC
 	trace := d.Tracer.ReceiveToken(getArgs.GToken)
 	trace.RecordAction(Get{getArgs.ClientId, getArgs.OpId, getArgs.Key})

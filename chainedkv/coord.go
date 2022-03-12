@@ -6,7 +6,10 @@ import (
 	"net/rpc"
 	"fmt"
 	"math/rand"
+	"cs.ubc.ca/cpsc416/a3/util"
 	"github.com/DistributedClocks/tracing"
+	"net"
+	"net/rpc"
 )
 
 // Actions to be recorded by coord (as part of ctrace, ktrace, and strace):
@@ -92,12 +95,22 @@ type Coord struct {
 
 type ServerInfo struct {
 	ServerAddr string
-	ServerId uint8
+	ServerId   uint8
 }
 
 func NewCoord() *Coord {
 	return &Coord{
 		Chain: []ServerInfo{},
+	}
+}
+
+type RemoteCoord struct {
+	Coord *Coord
+}
+
+func NewRemoteCoord() *RemoteCoord {
+	return &RemoteCoord{
+		Coord: nil,
 	}
 }
 
@@ -132,47 +145,54 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 	go rpc.Accept(lnClient)
 	go rpc.Accept(lnServer)
 
-	for true {
-
+	for {
+		// stay alive?
+		looping := 0
+		looping++
 	}
-
 	return nil
 }
 
-func (c *Coord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoiningRes *ServerJoiningRes) error {
-	// Tracing: ServerJoiningRecvd
+func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoiningRes *ServerJoiningRes) error {
+	c := remoteCoord.Coord
+
+  // Tracing: ServerJoiningRecvd
 	trace := c.Tracer.ReceiveToken(serverJoiningArgs.SToken)
 	trace.RecordAction(ServerJoiningRecvd{
 		ServerId: serverJoiningArgs.ServerId,
 	})
 
-	// Simple blocking until its the servers turn to join (Poor Efficieny?)
-	tail := c.Chain[c.AvailableServers]
+	// Simple blocking until its the servers turn to join (Poor Efficiency?)
+	tail := c.Chain[c.AvailableServers-1]
 	for tail.ServerId+1 != serverJoiningArgs.ServerId {} 
 
-	// Response to server
 	*serverJoiningRes = ServerJoiningRes{
-		TailServerListenAddr: tail.ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
-		SToken: trace.GenerateToken(),
+		TailServerListenAddr: c.Chain[c.AvailableServers-1].ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
+		SToken:               trace.GenerateToken(),
 	}
+	fmt.Println("Joining for", serverJoiningArgs.ServerId)
 	return nil
 }
 
-func (c *Coord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *uint8) error {
-	// Tracing: ServerJoinedRecvd
+func (remoteCoord *RemoteCoord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoiningRes) error {
+	c := remoteCoord.Coord
+
+  // Tracing: ServerJoinedRecvd
 	trace := c.Tracer.ReceiveToken(serverJoinedArgs.SToken)
 	trace.RecordAction(ServerJoinedRecvd{
 		ServerId: serverJoinedArgs.ServerId,
 	})
 
+
 	// Adding server to chain
 	serverInfo := ServerInfo{
 		ServerAddr: serverJoinedArgs.ServerListenAddr,
-		ServerId: serverJoinedArgs.ServerId,
+		ServerId:   serverJoinedArgs.ServerId,
 	}
-	c.Chain[c.AvailableServers] = serverInfo // Modify?
+  c.Chain = append(c.Chain, serverInfo)
 	c.AvailableServers++
-
+  fmt.Println("We have", c.AvailableServers, "available servers")
+  
 	// Tracing: NewChain
 	traceChain := NewChain{Chain: []uint8{}}
 	for i := range c.Chain {
@@ -293,8 +313,10 @@ func (c *Coord) OnServerFailure(token tracing.TracingToken, failedServer ServerI
 	})
 }
 
-func (c *Coord) GetHead(args *ClientArgs, headAddr *ClientRes) error {
-	// Tracing: HeadReqRecvd
+func (remoteCoord *RemoteCoord) GetHead(args *ClientArgs, headRes *ClientRes) error {
+	c := remoteCoord.Coord
+  
+  // Tracing: HeadReqRecvd
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := HeadReqRecvd{
 		ClientId: args.ClientId,
@@ -302,25 +324,28 @@ func (c *Coord) GetHead(args *ClientArgs, headAddr *ClientRes) error {
 	trace.RecordAction(req)
 
 	// Simple blocking until all servers join (Poor Efficiency?)
-	for c.AllJoined == false {}
+	for c.AllJoined == false {
+	}
 
-	// Tracing: HeadReqRecvd
+  // Tracing: TailRes
 	res := HeadRes{}
 	res.ClientId = args.ClientId
 	res.ServerId = c.Chain[0].ServerId
 	trace.RecordAction(res)
 
-	// Response to client
-	*headAddr = ClientRes{
-		ServerId: c.Chain[0].ServerId,
+  // Response to client
+	*headRes = ClientRes{
+		ServerId:   c.Chain[0].ServerId,
 		ServerAddr: c.Chain[0].ServerAddr,
-		KToken: args.KToken,
+		KToken:     args.KToken,
 	}
+	fmt.Println("Ending headreq")
 	return nil
 }
 
-func (c *Coord) GetTail(args *ClientArgs, tailAddr *ClientRes) error {
-	// Tracing: TailReqRecvd
+func (remoteCoord *RemoteCoord) GetTail(args *ClientArgs, tailRes *ClientRes) error {
+	c := remoteCoord.Coord
+  // Tracing: TailReqRecvd
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := TailReqRecvd{
 		ClientId: args.ClientId,
@@ -328,19 +353,20 @@ func (c *Coord) GetTail(args *ClientArgs, tailAddr *ClientRes) error {
 	trace.RecordAction(req)
 
 	// Simple blocking until all servers join (Poor Efficiency?)
-	for c.AllJoined == false {}
+	for c.AllJoined == false {
+	}
 
-	// Tracing: TailReqRecvd
+  // Tracing: TailRes
 	res := TailRes{}
 	res.ClientId = args.ClientId
 	res.ServerId = c.Chain[c.AvailableServers-1].ServerId
 	trace.RecordAction(res)
 
-	// Response to client
-	*tailAddr = ClientRes{
-		ServerId: c.Chain[c.AvailableServers-1].ServerId,
+  // Response to client
+	*tailRes = ClientRes{
+		ServerId:   c.Chain[c.AvailableServers-1].ServerId,
 		ServerAddr: c.Chain[c.AvailableServers-1].ServerAddr,
-		KToken: args.KToken,
+		KToken:     args.KToken,
 	}
 	return nil
 }
