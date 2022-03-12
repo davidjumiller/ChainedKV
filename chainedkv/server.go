@@ -2,12 +2,14 @@ package chainedkv
 
 import (
 	fchecker "cs.ubc.ca/cpsc416/a3/fcheck"
+	"cs.ubc.ca/cpsc416/a3/util"
 	"errors"
 	"fmt"
 	"github.com/DistributedClocks/tracing"
 	"math"
 	"net"
 	"net/rpc"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -302,8 +304,17 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	trace = strace.ReceiveToken(sToken)
 
 	// Start listening to heartbeats on random port
-	serverIP := getIPFromAddr(serverAddr)
-	serverAckAddr := fchecker.StartListener(fmt.Sprint(serverIP, ":"))
+	ackAddr := getRandomPortOnIP(serverAddr)
+	_, err = fchecker.Start(fchecker.StartStruct{
+		AckLocalIPAckLocalPort:       ackAddr,
+		EpochNonce:                   0,
+		HBeatLocalIPHBeatLocalPort:   "",
+		HBeatRemoteIPHBeatRemotePort: "",
+		LostMsgThresh:                0,
+	})
+	util.CheckErr(err, "Couldn't start fcheck in server ", serverId)
+	serverAckAddr := fchecker.StartListener(ackAddr)
+	defer fchecker.Stop()
 
 	// Start listening for RPCs
 	remote := NewRemoteServer()
@@ -317,7 +328,9 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	if err != nil {
 		return err
 	}
-	coordListenAddr, err := startRPCListener(fmt.Sprint(serverIP, ":")) // coord -> server RPC
+	rpcAddr := getRandomPortOnIP(serverAddr)
+	coordListenAddr, err := startRPCListener(rpcAddr)
+	// coord -> server RPC
 	if err != nil {
 		return err
 	}
@@ -337,6 +350,13 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		// run server indefinitely
 	}
 	return nil
+}
+
+func getRandomPortOnIP(addr string) string {
+	serverIP := getIPFromAddr(addr)
+	tcpAddr, err := net.ResolveTCPAddr("tcp", serverIP+":"+strconv.Itoa(0))
+	util.CheckErr(err, "Could not get random port!")
+	return tcpAddr.String()
 }
 
 func getIPFromAddr(addr string) string {

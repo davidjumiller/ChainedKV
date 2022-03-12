@@ -218,7 +218,7 @@ func (remoteCoord *RemoteCoord) OnServerJoined(serverJoinedArgs *ServerJoinedArg
 	// Starts fcheck on new server
 	r := rand.New(rand.NewSource(10))
 	startStruct := fchecker.StartStruct{
-		AckLocalIPAckLocalPort:       serverJoinedArgs.AckAddr,
+		AckLocalIPAckLocalPort:       getRandomPortOnIP(remoteCoord.Coord.ServerAPIListenAddr),
 		EpochNonce:                   r.Uint64(),
 		HBeatLocalIPHBeatLocalPort:   serverJoinedArgs.CoordListenAddr,
 		HBeatRemoteIPHBeatRemotePort: serverJoinedArgs.ServerListenAddr,
