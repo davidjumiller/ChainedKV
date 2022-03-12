@@ -126,7 +126,7 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 	c.LostMsgsThresh = lostMsgsThresh
 	c.ClientAPIListenAddr = clientAPIListenAddr
 	c.ServerAPIListenAddr = serverAPIListenAddr
-	c.Chain = make([]ServerInfo, numServers)
+	c.Chain = make([]ServerInfo, 0, numServers)
 
 	// Start accepting RPCs from clients and servers
 	lnClient, err := net.Listen("tcp", clientAPIListenAddr)
@@ -228,7 +228,7 @@ func (remoteCoord *RemoteCoord) OnServerJoined(serverJoinedArgs *ServerJoinedArg
 	if err != nil {
 		return err // Log failure?
 	}
-
+	<- fcheckChan
 	go c.OnServerFailure(serverJoinedArgs.SToken, serverInfo, fcheckChan)
 
 	return nil
@@ -244,64 +244,85 @@ func (c *Coord) OnServerFailure(token tracing.TracingToken, failedServer ServerI
 	// Finds the failed server in the chain by id
 	i := func() int {
 		for i := range c.Chain {
-			if c.Chain[i].ServerId == 4 {
+			if c.Chain[i].ServerId == failedServer.ServerId {
 				return i
 			}
 		}
-		return -1
+		return -1 // Could not find
 	}()
-
 	// Notifies prev and next nodes of failure
 	coordIP := getIPFromAddr(c.ServerAPIListenAddr)
 	coordServerAddr := fmt.Sprint(coordIP, ":")
-	prevNode := c.Chain[i-1]
-	nextNode := c.Chain[i+1]
 
-	prevConn, prevClient, err := establishRPCConnection(coordServerAddr, prevNode.ServerAddr)
-	if err != nil {
-		return
+	// Notify prev
+	var prevNode ServerInfo
+	var nextNode ServerInfo
+	if i > 0 {
+		prevNode = c.Chain[i-1]
+	} else {
+		prevNode = ServerInfo{
+			ServerId: 0,
+			ServerAddr: "",
+		}
 	}
-	args := ReplaceServerArgs{
-		FailedServerId:              failedServer.ServerId,
-		ReplacementServerId:         nextNode.ServerId,
-		ReplacementServerListenAddr: nextNode.ServerAddr,
-		CToken:                      token,
+	if i < int(c.AvailableServers-1) {
+		nextNode = c.Chain[i+1]
+	} else {
+		nextNode = ServerInfo {
+			ServerId: 0,
+			ServerAddr: "",
+		}
 	}
-	res := ReplaceServerRes{}
-	err = prevClient.Call("Server.ReplaceSuccessor", args, res) // Maybe run this async?
-	if err != nil {
-		return
-	}
-	prevClient.Close()
-	prevConn.Close()
 
-	trace.RecordAction(ServerFailHandledRecvd{
-		FailedServerId:   failedServer.ServerId,
-		AdjacentServerId: nextNode.ServerId,
-	})
+	if i > 0 {
+		prevConn, prevClient, err := establishRPCConnection(coordServerAddr, prevNode.ServerAddr)
+		if err != nil {
+			return
+		}
+		args := ReplaceServerArgs{
+			FailedServerId:              failedServer.ServerId,
+			ReplacementServerId:         nextNode.ServerId,
+			ReplacementServerListenAddr: nextNode.ServerAddr,
+			CToken:                      token,
+		}
+		res := ReplaceServerRes{}
+		err = prevClient.Call("Server.ReplaceSuccessor", args, res) // Maybe run this async?
+		if err != nil {
+			return
+		}
+		prevClient.Close()
+		prevConn.Close()
 
-	nextConn, nextClient, err := establishRPCConnection(coordServerAddr, nextNode.ServerAddr)
-	if err != nil {
-		return
+		trace.RecordAction(ServerFailHandledRecvd{
+			FailedServerId:   failedServer.ServerId,
+			AdjacentServerId: nextNode.ServerId,
+		})
 	}
-	args = ReplaceServerArgs{
-		FailedServerId:              failedServer.ServerId,
-		ReplacementServerId:         prevNode.ServerId,
-		ReplacementServerListenAddr: prevNode.ServerAddr,
-		CToken:                      token,
-	}
-	res = ReplaceServerRes{}
-	err = prevClient.Call("Server.ReplacePredecessor", args, res)
-	if err != nil {
-		return
-	}
-	nextClient.Close()
-	nextConn.Close()
 
-	trace.RecordAction(ServerFailHandledRecvd{
-		FailedServerId:   failedServer.ServerId,
-		AdjacentServerId: prevNode.ServerId,
-	})
+	if i < int(c.AvailableServers-1) {
+		nextConn, nextClient, err := establishRPCConnection(coordServerAddr, nextNode.ServerAddr)
+		if err != nil {
+			return
+		}
+		args := ReplaceServerArgs{
+			FailedServerId:              failedServer.ServerId,
+			ReplacementServerId:         prevNode.ServerId,
+			ReplacementServerListenAddr: prevNode.ServerAddr,
+			CToken:                      token,
+		}
+		res := ReplaceServerRes{}
+		err = nextClient.Call("Server.ReplacePredecessor", args, res)
+		if err != nil {
+			return
+		}
+		nextClient.Close()
+		nextConn.Close()
+
+		trace.RecordAction(ServerFailHandledRecvd{
+			FailedServerId:   failedServer.ServerId,
+			AdjacentServerId: prevNode.ServerId,
+		})
+	}
 
 	// Removes the failed server from the chain
 	newChain := c.Chain[:i]
