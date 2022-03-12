@@ -2,14 +2,12 @@ package chainedkv
 
 import (
 	fchecker "cs.ubc.ca/cpsc416/a3/fcheck"
-	"cs.ubc.ca/cpsc416/a3/util"
 	"errors"
 	"fmt"
 	"github.com/DistributedClocks/tracing"
 	"math"
 	"net"
 	"net/rpc"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -202,9 +200,9 @@ type NextServerJoiningRes struct {
 
 type ServerJoinedArgs struct {
 	ServerId         uint8
-	AckAddr          string
-	CoordListenAddr  string // coord -> this server
-	ServerListenAddr string // (caller) server -> this server
+	AckAddr          string // this server receives heartbeats from coord at this addr
+	CoordListenAddr  string // coord -> this server (this server receives RPC from coord at this addr)
+	ServerListenAddr string // (caller) server -> this server (this server receives RPC from servers at this addr)
 	SToken           tracing.TracingToken
 }
 
@@ -246,14 +244,17 @@ func NewRemoteServer() *RemoteServer {
 
 func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serverServerAddr string, serverListenAddr string, clientListenAddr string, strace *tracing.Tracer) error {
 	s.serverId = serverId
-
-	// Initialize trace
 	s.tracer = strace
 	trace := strace.CreateTrace()
 	trace.RecordAction(ServerStart{serverId})
 
 	// Connect to coord
 	_, cClient, err := establishRPCConnection(serverAddr, coordAddr)
+	if err != nil || cClient == nil {
+		fmt.Println("failed to establish connection to coord")
+		return err
+	}
+	defer cClient.Close()
 
 	/* Join */
 	// Send join request to coord; receive current tail
@@ -262,17 +263,10 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		ServerId: serverId,
 		SToken:   trace.GenerateToken(),
 	}
-	serverJoiningRes := &ServerJoiningRes{
-		TailServerListenAddr: "",
-		SToken:               nil,
-	}
-	if cClient == nil {
-		fmt.Println("it is nil.........")
-		fmt.Println(err)
-		return nil
-	}
-	err = cClient.Call("Coord.OnServerJoining", serverJoiningArgs, serverJoiningRes)
+	var serverJoiningRes ServerJoiningRes
+	err = cClient.Call("Coord.OnServerJoining", serverJoiningArgs, &serverJoiningRes)
 	if err != nil {
+		fmt.Println("failed to call Coord.OnServerJoining")
 		return err
 	}
 	sToken := serverJoiningRes.SToken
@@ -283,6 +277,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	if !s.isHead {
 		predConn, predClient, err := establishRPCConnection(serverServerAddr, s.predecessorListenAddr)
 		if err != nil {
+			fmt.Println("failed to establish connection to predecessor at", s.predecessorListenAddr)
 			return err
 		}
 
@@ -294,6 +289,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		var nextServerJoiningRes NextServerJoiningRes
 		err = predClient.Call("Server.AddSuccessor", nextServerJoiningArgs, &nextServerJoiningRes)
 		if err != nil {
+			fmt.Println("failed to call predecessor's AddSuccessor")
 			return err
 		}
 		predClient.Close()
@@ -304,17 +300,10 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	trace = strace.ReceiveToken(sToken)
 
 	// Start listening to heartbeats on random port
-	ackAddr := getRandomPortOnIP(serverAddr)
-	_, err = fchecker.Start(fchecker.StartStruct{
-		AckLocalIPAckLocalPort:       ackAddr,
-		EpochNonce:                   0,
-		HBeatLocalIPHBeatLocalPort:   "",
-		HBeatRemoteIPHBeatRemotePort: "",
-		LostMsgThresh:                0,
-	})
-	util.CheckErr(err, "Couldn't start fcheck in server ", serverId)
-	serverAckAddr := fchecker.StartListener(ackAddr)
-	defer fchecker.Stop()
+	serverIP := getIPFromAddr(serverAddr)
+	serverAckNetAddr := fchecker.StartListener(fmt.Sprint(serverIP, ":"))
+	_, serverAckPort := splitAddrParts(serverAckNetAddr.String())
+	serverAckAddr := fmt.Sprintf("%s:%s", serverIP, serverAckPort)
 
 	// Start listening for RPCs
 	remote := NewRemoteServer()
@@ -322,25 +311,28 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	s.serverClientIP = getIPFromAddr(clientListenAddr)
 	err = rpc.RegisterName("Server", remote)
 	if err != nil {
+		fmt.Println("failed to register this server for RPC")
 		return err
 	}
 	_, err = startRPCListener(serverListenAddr) // server -> server RPC
 	if err != nil {
+		fmt.Println("failed to start listening for RPCs from adjacent servers at", serverListenAddr)
 		return err
 	}
-	rpcAddr := getRandomPortOnIP(serverAddr)
-	coordListenAddr, err := startRPCListener(rpcAddr)
-	// coord -> server RPC
+	coordListenNetAddr, err := startRPCListener(fmt.Sprint(serverIP, ":")) // coord -> server RPC
 	if err != nil {
+		fmt.Println("failed to start listening for RPCs from coord at", coordListenNetAddr)
 		return err
 	}
+	_, coordListenPort := splitAddrParts(coordListenNetAddr.String())
+	coordListenAddr := fmt.Sprintf("%s:%s", serverIP, coordListenPort)
 
 	// Notify coord that s has successfully joined
 	trace.RecordAction(ServerJoined{serverId})
 	serverJoinedArgs := &ServerJoinedArgs{
 		ServerId:         serverId,
-		AckAddr:          serverAckAddr.String(),
-		CoordListenAddr:  coordListenAddr.String(),
+		AckAddr:          serverAckAddr,
+		CoordListenAddr:  coordListenAddr,
 		ServerListenAddr: serverListenAddr,
 		SToken:           trace.GenerateToken(),
 	}
@@ -352,15 +344,17 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	return nil
 }
 
-func getRandomPortOnIP(addr string) string {
-	serverIP := getIPFromAddr(addr)
-	tcpAddr, err := net.ResolveTCPAddr("tcp", serverIP+":"+strconv.Itoa(0))
-	util.CheckErr(err, "Could not get random port!")
-	return tcpAddr.String()
+func getIPFromAddr(addr string) string {
+	ip, _ := splitAddrParts(addr)
+	return ip
 }
 
-func getIPFromAddr(addr string) string {
-	return strings.Split(addr, ":")[0]
+func splitAddrParts(addr string) (string, string) {
+	ends := strings.Split(addr, ":")
+	if len(ends) == 0 {
+		return "", ""
+	}
+	return ends[0], ends[len(ends)-1]
 }
 
 func establishRPCConnection(laddr, raddr string) (*net.TCPConn, *rpc.Client, error) {
