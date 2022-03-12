@@ -2,11 +2,11 @@ package chainedkv
 
 import (
 	fchecker "cs.ubc.ca/cpsc416/a3/fcheck"
+	"fmt"
+	"github.com/DistributedClocks/tracing"
+	"math/rand"
 	"net"
 	"net/rpc"
-	"fmt"
-	"math/rand"
-	"github.com/DistributedClocks/tracing"
 )
 
 // Actions to be recorded by coord (as part of ctrace, ktrace, and strace):
@@ -67,27 +67,27 @@ type CoordConfig struct {
 }
 
 type ClientArgs struct {
-	ClientId string
+	ClientId   string
 	ClientAddr string
-	KToken tracing.TracingToken
+	KToken     tracing.TracingToken
 }
 
 type ClientRes struct {
-	ServerId uint8
+	ServerId   uint8
 	ServerAddr string
-	KToken tracing.TracingToken
+	KToken     tracing.TracingToken
 }
 
 type Coord struct {
-	Tracer *tracing.Tracer
-	Trace *tracing.Trace
+	Tracer              *tracing.Tracer
+	Trace               *tracing.Trace
 	ClientAPIListenAddr string
 	ServerAPIListenAddr string
-	LostMsgsThresh uint8
-	NumServers uint8
-	AvailableServers uint8
-	AllJoined bool
-	Chain []ServerInfo
+	LostMsgsThresh      uint8
+	NumServers          uint8
+	AvailableServers    uint8
+	AllJoined           bool
+	Chain               []ServerInfo
 }
 
 type ServerInfo struct {
@@ -126,6 +126,7 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 	c.LostMsgsThresh = lostMsgsThresh
 	c.ClientAPIListenAddr = clientAPIListenAddr
 	c.ServerAPIListenAddr = serverAPIListenAddr
+	c.Chain = make([]ServerInfo, numServers)
 
 	// Start accepting RPCs from clients and servers
 	lnClient, err := net.Listen("tcp", clientAPIListenAddr)
@@ -136,11 +137,10 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 	if err != nil {
 		return err
 	}
-	
+
 	rc := NewRemoteCoord()
 	rc.Coord = c
-	rpc.Register(rc)
-
+	rpc.RegisterName("Coord", rc)
 	go rpc.Accept(lnClient)
 	go rpc.Accept(lnServer)
 
@@ -155,7 +155,7 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoiningRes *ServerJoiningRes) error {
 	c := remoteCoord.Coord
 
-  	// Tracing: ServerJoiningRecvd
+	// Tracing: ServerJoiningRecvd
 	trace := c.Tracer.ReceiveToken(serverJoiningArgs.SToken)
 	trace.RecordAction(ServerJoiningRecvd{
 		ServerId: serverJoiningArgs.ServerId,
@@ -163,7 +163,8 @@ func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoining
 
 	// Simple blocking until its the servers turn to join (Poor Efficiency?)
 	tail := c.Chain[c.AvailableServers-1]
-	for tail.ServerId+1 != serverJoiningArgs.ServerId {} 
+	for tail.ServerId+1 != serverJoiningArgs.ServerId {
+	}
 
 	*serverJoiningRes = ServerJoiningRes{
 		TailServerListenAddr: c.Chain[c.AvailableServers-1].ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
@@ -173,25 +174,24 @@ func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoining
 	return nil
 }
 
-func (remoteCoord *RemoteCoord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoiningRes) error {
+func (remoteCoord *RemoteCoord) OnServerJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoiningRes) error {
 	c := remoteCoord.Coord
 
-  	// Tracing: ServerJoinedRecvd
+	// Tracing: ServerJoinedRecvd
 	trace := c.Tracer.ReceiveToken(serverJoinedArgs.SToken)
 	trace.RecordAction(ServerJoinedRecvd{
 		ServerId: serverJoinedArgs.ServerId,
 	})
-
 
 	// Adding server to chain
 	serverInfo := ServerInfo{
 		ServerAddr: serverJoinedArgs.ServerListenAddr,
 		ServerId:   serverJoinedArgs.ServerId,
 	}
-  	c.Chain = append(c.Chain, serverInfo)
+	c.Chain = append(c.Chain, serverInfo)
 	c.AvailableServers++
-  	fmt.Println("We have", c.AvailableServers, "available servers")
-  
+	fmt.Println("We have", c.AvailableServers, "available servers")
+
 	// Tracing: NewChain
 	traceChain := NewChain{Chain: []uint8{}}
 	for i := range c.Chain {
@@ -208,18 +208,18 @@ func (remoteCoord *RemoteCoord) OnJoined(serverJoinedArgs *ServerJoinedArgs, ser
 
 	// Starts fcheck on new server
 	r := rand.New(rand.NewSource(10))
-	startStruct := fchecker.StartStruct {
-		AckLocalIPAckLocalPort: serverJoinedArgs.AckAddr,
-		EpochNonce: r.Uint64(),
-		HBeatLocalIPHBeatLocalPort: serverJoinedArgs.CoordListenAddr,
+	startStruct := fchecker.StartStruct{
+		AckLocalIPAckLocalPort:       serverJoinedArgs.AckAddr,
+		EpochNonce:                   r.Uint64(),
+		HBeatLocalIPHBeatLocalPort:   serverJoinedArgs.CoordListenAddr,
 		HBeatRemoteIPHBeatRemotePort: serverJoinedArgs.ServerListenAddr,
-		LostMsgThresh: c.LostMsgsThresh,
+		LostMsgThresh:                c.LostMsgsThresh,
 	}
 	fcheckChan, err := fchecker.Start(startStruct)
 	if err != nil {
 		return err // Log failure?
 	}
-	
+
 	go c.OnServerFailure(serverJoinedArgs.SToken, serverInfo, fcheckChan)
 
 	return nil
@@ -253,10 +253,10 @@ func (c *Coord) OnServerFailure(token tracing.TracingToken, failedServer ServerI
 		return
 	}
 	args := ReplaceServerArgs{
-		FailedServerId: failedServer.ServerId,
-		ReplacementServerId: nextNode.ServerId,
+		FailedServerId:              failedServer.ServerId,
+		ReplacementServerId:         nextNode.ServerId,
 		ReplacementServerListenAddr: nextNode.ServerAddr,
-		CToken: token,
+		CToken:                      token,
 	}
 	res := ReplaceServerRes{}
 	err = prevClient.Call("Server.ReplaceSuccessor", args, res) // Maybe run this async?
@@ -267,7 +267,7 @@ func (c *Coord) OnServerFailure(token tracing.TracingToken, failedServer ServerI
 	prevConn.Close()
 
 	trace.RecordAction(ServerFailHandledRecvd{
-		FailedServerId: failedServer.ServerId,
+		FailedServerId:   failedServer.ServerId,
 		AdjacentServerId: nextNode.ServerId,
 	})
 
@@ -276,10 +276,10 @@ func (c *Coord) OnServerFailure(token tracing.TracingToken, failedServer ServerI
 		return
 	}
 	args = ReplaceServerArgs{
-		FailedServerId: failedServer.ServerId,
-		ReplacementServerId: prevNode.ServerId,
+		FailedServerId:              failedServer.ServerId,
+		ReplacementServerId:         prevNode.ServerId,
 		ReplacementServerListenAddr: prevNode.ServerAddr,
-		CToken: token,
+		CToken:                      token,
 	}
 	res = ReplaceServerRes{}
 	err = prevClient.Call("Server.ReplacePredecessor", args, res)
@@ -290,7 +290,7 @@ func (c *Coord) OnServerFailure(token tracing.TracingToken, failedServer ServerI
 	nextConn.Close()
 
 	trace.RecordAction(ServerFailHandledRecvd{
-		FailedServerId: failedServer.ServerId,
+		FailedServerId:   failedServer.ServerId,
 		AdjacentServerId: prevNode.ServerId,
 	})
 
@@ -314,8 +314,8 @@ func (c *Coord) OnServerFailure(token tracing.TracingToken, failedServer ServerI
 
 func (remoteCoord *RemoteCoord) GetHead(args *ClientArgs, headRes *ClientRes) error {
 	c := remoteCoord.Coord
-  
-  // Tracing: HeadReqRecvd
+
+	// Tracing: HeadReqRecvd
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := HeadReqRecvd{
 		ClientId: args.ClientId,
@@ -326,13 +326,13 @@ func (remoteCoord *RemoteCoord) GetHead(args *ClientArgs, headRes *ClientRes) er
 	for c.AllJoined == false {
 	}
 
-  // Tracing: TailRes
+	// Tracing: TailRes
 	res := HeadRes{}
 	res.ClientId = args.ClientId
 	res.ServerId = c.Chain[0].ServerId
 	trace.RecordAction(res)
 
-  // Response to client
+	// Response to client
 	*headRes = ClientRes{
 		ServerId:   c.Chain[0].ServerId,
 		ServerAddr: c.Chain[0].ServerAddr,
@@ -344,7 +344,7 @@ func (remoteCoord *RemoteCoord) GetHead(args *ClientArgs, headRes *ClientRes) er
 
 func (remoteCoord *RemoteCoord) GetTail(args *ClientArgs, tailRes *ClientRes) error {
 	c := remoteCoord.Coord
-  // Tracing: TailReqRecvd
+	// Tracing: TailReqRecvd
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := TailReqRecvd{
 		ClientId: args.ClientId,
@@ -355,13 +355,13 @@ func (remoteCoord *RemoteCoord) GetTail(args *ClientArgs, tailRes *ClientRes) er
 	for c.AllJoined == false {
 	}
 
-  // Tracing: TailRes
+	// Tracing: TailRes
 	res := TailRes{}
 	res.ClientId = args.ClientId
 	res.ServerId = c.Chain[c.AvailableServers-1].ServerId
 	trace.RecordAction(res)
 
-  // Response to client
+	// Response to client
 	*tailRes = ClientRes{
 		ServerId:   c.Chain[c.AvailableServers-1].ServerId,
 		ServerAddr: c.Chain[c.AvailableServers-1].ServerAddr,
