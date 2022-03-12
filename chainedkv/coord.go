@@ -4,6 +4,8 @@ import (
 	fchecker "cs.ubc.ca/cpsc416/a3/fcheck"
 	"net"
 	"net/rpc"
+	"fmt"
+	"math/rand"
 	"github.com/DistributedClocks/tracing"
 )
 
@@ -64,14 +66,6 @@ type CoordConfig struct {
 	TracingIdentity     string
 }
 
-type Head struct {
-	Head string
-}
-
-type Tail struct {
-	Tail string
-}
-
 type ClientArgs struct {
 	ClientId string
 	ClientAddr string
@@ -85,10 +79,11 @@ type ClientRes struct {
 }
 
 type Coord struct {
-	// Coord state may go here
 	Tracer *tracing.Tracer
 	Trace *tracing.Trace
-	lostMsgsThresh uint8
+	ClientAPIListenAddr string
+	ServerAPIListenAddr string
+	LostMsgsThresh uint8
 	NumServers uint8
 	AvailableServers uint8
 	AllJoined bool
@@ -107,18 +102,22 @@ func NewCoord() *Coord {
 }
 
 func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lostMsgsThresh uint8, numServers uint8, ctrace *tracing.Tracer) error {
-
+	// Tracing: CoordStart
 	c.Tracer = ctrace
 	c.Trace = ctrace.CreateTrace()
 	trace := c.Trace
 	cStart := CoordStart{}
 	trace.RecordAction(cStart)
 
+	// Set initial Coord values
 	c.AvailableServers = 0
 	c.NumServers = numServers
 	c.AllJoined = false
-	c.lostMsgsThresh = lostMsgsThresh
+	c.LostMsgsThresh = lostMsgsThresh
+	c.ClientAPIListenAddr = clientAPIListenAddr
+	c.ServerAPIListenAddr = serverAPIListenAddr
 
+	// Start accepting RPCs from clients and servers
 	lnClient, err := net.Listen("tcp", clientAPIListenAddr)
 	if err != nil {
 		return err
@@ -141,74 +140,161 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 }
 
 func (c *Coord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoiningRes *ServerJoiningRes) error {
-	trace := c.Tracer.ReceiveToken(serverJoiningArgs.sToken)
+	// Tracing: ServerJoiningRecvd
+	trace := c.Tracer.ReceiveToken(serverJoiningArgs.SToken)
 	trace.RecordAction(ServerJoiningRecvd{
-		ServerId: serverJoiningArgs.serverId,
+		ServerId: serverJoiningArgs.ServerId,
 	})
 
-	tail := c.Chain[c.AvailableServers]
-
 	// Simple blocking until its the servers turn to join (Poor Efficieny?)
-	for tail.ServerId+1 != serverJoiningArgs.serverId {} 
+	tail := c.Chain[c.AvailableServers]
+	for tail.ServerId+1 != serverJoiningArgs.ServerId {} 
 
+	// Response to server
 	*serverJoiningRes = ServerJoiningRes{
-		tailServerListenAddr: tail.ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
-		sToken: trace.GenerateToken(),
+		TailServerListenAddr: tail.ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
+		SToken: trace.GenerateToken(),
 	}
 	return nil
 }
 
-func (c *Coord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoinedRes) error {
-	trace := c.Tracer.ReceiveToken(serverJoinedArgs.sToken)
+func (c *Coord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *uint8) error {
+	// Tracing: ServerJoinedRecvd
+	trace := c.Tracer.ReceiveToken(serverJoinedArgs.SToken)
 	trace.RecordAction(ServerJoinedRecvd{
-		ServerId: serverJoinedArgs.serverId,
+		ServerId: serverJoinedArgs.ServerId,
 	})
 
+	// Adding server to chain
 	serverInfo := ServerInfo{
-		ServerAddr: serverJoinedArgs.serverListenAddr,
-		ServerId: serverJoinedArgs.serverId,
+		ServerAddr: serverJoinedArgs.ServerListenAddr,
+		ServerId: serverJoinedArgs.ServerId,
 	}
-	c.Chain[c.AvailableServers] = serverInfo
-
+	c.Chain[c.AvailableServers] = serverInfo // Modify?
 	c.AvailableServers++
+
+	// Tracing: NewChain
 	traceChain := NewChain{Chain: []uint8{}}
 	for i := range c.Chain {
 		traceChain.Chain = append(traceChain.Chain, c.Chain[i].ServerId)
 	}
 	trace = c.Trace
 	trace.RecordAction(traceChain)
-	// Ack?
 
+	// Check if all servers have joined
 	if c.AvailableServers == c.NumServers && c.AllJoined == false {
 		trace.RecordAction(AllServersJoined{})
 		c.AllJoined = true
 	}
 
-	// TODO: Start running fcheck (async) on this new server (new UDP connection)
-	// TODO: On failure, run c.OnServerFailure(failedServer)
+	// Starts fcheck on new server
+	r := rand.New(rand.NewSource(10))
 	startStruct := fchecker.StartStruct {
-		AckLocalIPAckLocalPort: "Temp",
-		EpochNonce: 1,
-		HBeatLocalIPHBeatLocalPort: "Temp",
-		HBeatRemoteIPHBeatRemotePort: "Temp",
-		LostMsgThresh: c.lostMsgsThresh,
+		AckLocalIPAckLocalPort: serverJoinedArgs.AckAddr,
+		EpochNonce: r.Uint64(),
+		HBeatLocalIPHBeatLocalPort: serverJoinedArgs.CoordListenAddr,
+		HBeatRemoteIPHBeatRemotePort: serverJoinedArgs.ServerListenAddr,
+		LostMsgThresh: c.LostMsgsThresh,
 	}
 	fcheckChan, err := fchecker.Start(startStruct)
 	if err != nil {
 		return err // Log failure?
 	}
 	
-	go c.OnServerFailure(serverInfo, fcheckChan)
+	go c.OnServerFailure(serverJoinedArgs.SToken, serverInfo, fcheckChan)
 
 	return nil
 }
 
-func (c *Coord) OnServerFailure(failedServer ServerInfo, failReport <-chan fchecker.FailureDetected) {
-	// TODO: Create new chain with server removed
-	// TODO: RPC servers that need to change their prev/next
+func (c *Coord) OnServerFailure(token tracing.TracingToken, failedServer ServerInfo, failReport <-chan fchecker.FailureDetected) {
+	// Tracing: ServerFail
+	trace := c.Tracer.ReceiveToken(token)
+	trace.RecordAction(ServerFail{
+		ServerId: failedServer.ServerId,
+	})
+
+	// Finds the failed server in the chain by id
+	i := func() int {
+		for i := range c.Chain {
+			if c.Chain[i].ServerId == 4 {
+				return i
+			}
+		}
+		return -1
+	}()
+
+	// Notifies prev and next nodes of failure
+	coordIP := getIPFromAddr(c.ServerAPIListenAddr)
+	coordServerAddr := fmt.Sprint(coordIP, ":")
+	prevNode := c.Chain[i-1]
+	nextNode := c.Chain[i+1]
+
+	prevConn, prevClient, err := establishRPCConnection(coordServerAddr, prevNode.ServerAddr)
+	if err != nil {
+		return
+	}
+	args := ReplaceServerArgs{
+		FailedServerId: failedServer.ServerId,
+		ReplacementServerId: nextNode.ServerId,
+		ReplacementServerListenAddr: nextNode.ServerAddr,
+		CToken: token,
+	}
+	res := ReplaceServerRes{}
+	err = prevClient.Call("Server.ReplaceSuccessor", args, res) // Maybe run this async?
+	if err != nil {
+		return
+	}
+	prevClient.Close()
+	prevConn.Close()
+
+	trace.RecordAction(ServerFailHandledRecvd{
+		FailedServerId: failedServer.ServerId,
+		AdjacentServerId: nextNode.ServerId,
+	})
+
+	nextConn, nextClient, err := establishRPCConnection(coordServerAddr, nextNode.ServerAddr)
+	if err != nil {
+		return
+	}
+	args = ReplaceServerArgs{
+		FailedServerId: failedServer.ServerId,
+		ReplacementServerId: prevNode.ServerId,
+		ReplacementServerListenAddr: prevNode.ServerAddr,
+		CToken: token,
+	}
+	res = ReplaceServerRes{}
+	err = prevClient.Call("Server.ReplacePredecessor", args, res)
+	if err != nil {
+		return
+	}
+	nextClient.Close()
+	nextConn.Close()
+
+	trace.RecordAction(ServerFailHandledRecvd{
+		FailedServerId: failedServer.ServerId,
+		AdjacentServerId: prevNode.ServerId,
+	})
+
+	// Removes the failed server from the chain
+	newChain := c.Chain[:i]
+	i++
+	for ; i < len(c.Chain); i++ {
+		newChain = append(newChain, c.Chain[i])
+	}
+	c.Chain = newChain
+	c.AvailableServers--
+
+	traceChain := []uint8{}
+	for i := range c.Chain {
+		traceChain = append(traceChain, c.Chain[i].ServerId)
+	}
+	trace.RecordAction(NewChain{
+		Chain: traceChain,
+	})
 }
 
-func (c *Coord) GetHead(args *ClientArgs, headAddr *string) error {
+func (c *Coord) GetHead(args *ClientArgs, headAddr *ClientRes) error {
+	// Tracing: HeadReqRecvd
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := HeadReqRecvd{
 		ClientId: args.ClientId,
@@ -218,16 +304,23 @@ func (c *Coord) GetHead(args *ClientArgs, headAddr *string) error {
 	// Simple blocking until all servers join (Poor Efficiency?)
 	for c.AllJoined == false {}
 
+	// Tracing: HeadReqRecvd
 	res := HeadRes{}
 	res.ClientId = args.ClientId
 	res.ServerId = c.Chain[0].ServerId
 	trace.RecordAction(res)
 
-	*headAddr = c.Chain[0].ServerAddr
+	// Response to client
+	*headAddr = ClientRes{
+		ServerId: c.Chain[0].ServerId,
+		ServerAddr: c.Chain[0].ServerAddr,
+		KToken: args.KToken,
+	}
 	return nil
 }
 
-func (c *Coord) GetTail(args *ClientArgs, tailAddr *string) error {
+func (c *Coord) GetTail(args *ClientArgs, tailAddr *ClientRes) error {
+	// Tracing: TailReqRecvd
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := TailReqRecvd{
 		ClientId: args.ClientId,
@@ -237,11 +330,17 @@ func (c *Coord) GetTail(args *ClientArgs, tailAddr *string) error {
 	// Simple blocking until all servers join (Poor Efficiency?)
 	for c.AllJoined == false {}
 
+	// Tracing: TailReqRecvd
 	res := TailRes{}
 	res.ClientId = args.ClientId
 	res.ServerId = c.Chain[c.AvailableServers-1].ServerId
 	trace.RecordAction(res)
 
-	*tailAddr = c.Chain[c.AvailableServers-1].ServerAddr
+	// Response to client
+	*tailAddr = ClientRes{
+		ServerId: c.Chain[c.AvailableServers-1].ServerId,
+		ServerAddr: c.Chain[c.AvailableServers-1].ServerAddr,
+		KToken: args.KToken,
+	}
 	return nil
 }
