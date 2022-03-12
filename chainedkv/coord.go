@@ -2,6 +2,7 @@ package chainedkv
 
 import (
 	fchecker "cs.ubc.ca/cpsc416/a3/fcheck"
+	"cs.ubc.ca/cpsc416/a3/util"
 	"fmt"
 	"github.com/DistributedClocks/tracing"
 	"math/rand"
@@ -164,9 +165,11 @@ func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoining
 	// Simple blocking until its the servers turn to join (Poor Efficiency?)
 	if c.AvailableServers > 0 {
 		tail := c.Chain[c.AvailableServers-1]
-		for tail.ServerId+1 != serverJoiningArgs.ServerId {} 
+		for tail.ServerId+1 != serverJoiningArgs.ServerId {
+		}
 	} else {
-		for 1 != serverJoiningArgs.ServerId {}
+		for 1 != serverJoiningArgs.ServerId {
+		}
 	}
 	// Note, revisit this, potential ordering issue depending on spec
 	var tailListenAddr string
@@ -217,11 +220,13 @@ func (remoteCoord *RemoteCoord) OnServerJoined(serverJoinedArgs *ServerJoinedArg
 
 	// Starts fcheck on new server
 	r := rand.New(rand.NewSource(10))
+	dummyAddr := getRandomUDPPortOnIP(c.ServerAPIListenAddr)
+	hBeatLocalAddr := getRandomUDPPortOnIP(c.ServerAPIListenAddr)
 	startStruct := fchecker.StartStruct{
-		AckLocalIPAckLocalPort:       serverJoinedArgs.AckAddr,
+		AckLocalIPAckLocalPort:       dummyAddr,
 		EpochNonce:                   r.Uint64(),
-		HBeatLocalIPHBeatLocalPort:   serverJoinedArgs.CoordListenAddr,
-		HBeatRemoteIPHBeatRemotePort: serverJoinedArgs.ServerListenAddr,
+		HBeatLocalIPHBeatLocalPort:   hBeatLocalAddr,
+		HBeatRemoteIPHBeatRemotePort: serverJoinedArgs.AckAddr,
 		LostMsgThresh:                c.LostMsgsThresh,
 	}
 	fcheckChan, err := fchecker.Start(startStruct)
@@ -377,4 +382,11 @@ func (remoteCoord *RemoteCoord) GetTail(args *ClientArgs, tailRes *ClientRes) er
 		KToken:     args.KToken,
 	}
 	return nil
+}
+
+func getRandomUDPPortOnIP(addr string) string {
+	serverIP := getIPFromAddr(addr)
+	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprint(serverIP, ":"))
+	util.CheckErr(err, "Could not get random port!")
+	return udpAddr.String()
 }
