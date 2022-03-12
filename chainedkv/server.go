@@ -334,9 +334,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	cClient.Go("Coord.OnServerJoined", serverJoinedArgs, nil, nil)
 
 	for {
-		// stay alive?
-		looping := 0
-		looping++
+		// run server indefinitely
 	}
 	return nil
 }
