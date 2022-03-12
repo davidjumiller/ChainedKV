@@ -162,11 +162,21 @@ func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoining
 	})
 
 	// Simple blocking until its the servers turn to join (Poor Efficiency?)
-	tail := c.Chain[c.AvailableServers-1]
-	for tail.ServerId+1 != serverJoiningArgs.ServerId {} 
-
+	if c.AvailableServers > 0 {
+		tail := c.Chain[c.AvailableServers-1]
+		for tail.ServerId+1 != serverJoiningArgs.ServerId {} 
+	} else {
+		for 1 != serverJoiningArgs.ServerId {}
+	}
+	// Note, revisit this, potential ordering issue depending on spec
+	var tailListenAddr string
+	if c.AvailableServers == 0 {
+		tailListenAddr = ""
+	} else {
+		tailListenAddr = c.Chain[c.AvailableServers-1].ServerAddr
+	}
 	*serverJoiningRes = ServerJoiningRes{
-		TailServerListenAddr: c.Chain[c.AvailableServers-1].ServerAddr, // TailAddr can be nil on empty chain, server should recognize this
+		TailServerListenAddr: tailListenAddr, // TailAddr can be nil on empty chain, server should recognize this
 		SToken:               trace.GenerateToken(),
 	}
 	fmt.Println("Joining for", serverJoiningArgs.ServerId)
