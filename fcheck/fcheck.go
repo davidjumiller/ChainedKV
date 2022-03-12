@@ -92,6 +92,9 @@ func StartListener(ackLocalIPAckLocalPort string) net.Addr {
 	// Create listener for heartbeats
 	ackAddr, err := net.ResolveUDPAddr("udp", ackLocalIPAckLocalPort)
 	ln, err := net.ListenUDP("udp", ackAddr)
+	if err != nil {
+		fmt.Println("This is the error:", err)
+	}
 	CheckErr(err, "Could not listen on", ackLocalIPAckLocalPort)
 
 	// Listen forever...
