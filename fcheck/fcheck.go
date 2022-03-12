@@ -93,7 +93,7 @@ func StartListener(ackLocalIPAckLocalPort string) net.Addr {
 	ackAddr, err := net.ResolveUDPAddr("udp", ackLocalIPAckLocalPort)
 	ln, err := net.ListenUDP("udp", ackAddr)
 	if err != nil {
-		fmt.Println("This is the error:", err)
+		// fmt.Printlnintln("This is the error:", err)
 	}
 	CheckErr(err, "Could not listen on", ackLocalIPAckLocalPort)
 
@@ -107,12 +107,12 @@ func StartListener(ackLocalIPAckLocalPort string) net.Addr {
 // Tells the library to stop monitoring/responding acks.
 func Stop() {
 	listenCh <- 1
-	fmt.Println("Notified to stop listening")
+	// fmt.Printlnintln("Notified to stop listening")
 	err := ln.Close()
 	CheckErr(err, "Error closing listener conn", err)
 
 	monitorCh <- 1
-	fmt.Println("Notified to stop monitoring")
+	// fmt.Printlnintln("Notified to stop monitoring")
 	err = conn.Close()
 	CheckErr(err, "Error closing monitor conn conn", err)
 
@@ -230,9 +230,9 @@ func listen(ln *net.UDPConn) {
 	for {
 		select {
 		case <-listenCh:
-			fmt.Println("--- STOP LISTENING ---")
+			// fmt.Printlnintln("--- STOP LISTENING ---")
 			return
-		case <-time.After(time.Second):
+		case <-time.After(time.Millisecond):
 			// Receive heartbeats
 			var heartbeat HBeatMessage
 			remoteAddr, err := receiveHeartbeat(&heartbeat, ln)
@@ -271,12 +271,12 @@ func monitor(conn net.Conn, epochNonce uint64, lostMsgThreshold uint8, remotePor
 				timeReceived, err := receiveTimedAck(&ack, conn, rtt)
 
 				if err != nil {
-					fmt.Println("timeout occurred")
+					// fmt.Printlnintln("timeout occurred")
 					// Timeout
 					if lostMsgs >= lostMsgThreshold {
-						fmt.Println("Failure has been detected.")
+						// fmt.Printlnintln("Failure has been detected.")
 						globalCh <- FailureDetected{UDPIpPort: remotePort, Timestamp: time.Now()}
-						fmt.Println("Notification sent.")
+						// fmt.Printlnintln("Notification sent.")
 						failed = true
 					} else {
 						lostMsgs++
@@ -287,7 +287,7 @@ func monitor(conn net.Conn, epochNonce uint64, lostMsgThreshold uint8, remotePor
 						// Update RTT
 						newRtt := timeReceived.Sub(sendTimes[seqNum])
 						rtt = (rtt + newRtt) / 2 // Update RTT
-						fmt.Println("new rtt", rtt)
+						// fmt.Printlnintln("new rtt", rtt)
 
 						lostMsgs = 0
 						if ack.HBEatSeqNum == seqNum {
@@ -295,7 +295,7 @@ func monitor(conn net.Conn, epochNonce uint64, lostMsgThreshold uint8, remotePor
 						}
 
 					} else {
-						fmt.Println("ignored message")
+						// fmt.Printlnintln("ignored message")
 						// ignore the msg; it's not ours
 					}
 				}

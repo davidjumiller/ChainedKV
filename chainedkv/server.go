@@ -251,6 +251,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	// Connect to coord
 	_, cClient, err := establishRPCConnection(serverAddr, coordAddr)
 	if err != nil || cClient == nil {
+		fmt.Println(err)
 		fmt.Println("failed to establish connection to coord")
 		return err
 	}
@@ -277,6 +278,8 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	if !s.isHead {
 		predConn, predClient, err := establishRPCConnection(serverServerAddr, s.predecessorListenAddr)
 		if err != nil {
+			fmt.Println(err)
+			fmt.Println("serverserveraddr", serverServerAddr)
 			fmt.Println("failed to establish connection to predecessor at", s.predecessorListenAddr)
 			return err
 		}
@@ -289,6 +292,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		var nextServerJoiningRes NextServerJoiningRes
 		err = predClient.Call("Server.AddSuccessor", nextServerJoiningArgs, &nextServerJoiningRes)
 		if err != nil {
+			fmt.Println(err)
 			fmt.Println("failed to call predecessor's AddSuccessor")
 			return err
 		}
@@ -388,7 +392,8 @@ func startRPCListener(rpcListenAddr string) (net.Addr, error) {
 	return listener.Addr(), nil
 }
 
-func (s *Server) AddSuccessor(args *NextServerJoiningArgs, reply *NextServerJoiningRes) error {
+func (remoteServer *RemoteServer) AddSuccessor(args *NextServerJoiningArgs, reply *NextServerJoiningRes) error {
+	s := remoteServer.Server
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -408,7 +413,8 @@ func (s *Server) AddSuccessor(args *NextServerJoiningArgs, reply *NextServerJoin
 	return nil
 }
 
-func (s *Server) ReplacePredecessor(args *ReplaceServerArgs, reply *ReplaceServerRes) error {
+func (remoteServer *RemoteServer) ReplacePredecessor(args *ReplaceServerArgs, reply *ReplaceServerRes) error {
+	s := remoteServer.Server
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
