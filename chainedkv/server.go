@@ -232,6 +232,16 @@ func NewServer() *Server {
 	}
 }
 
+type RemoteServer struct {
+	Server *Server
+}
+
+func NewRemoteServer() *RemoteServer {
+	return &RemoteServer{
+		Server: nil,
+	}
+}
+
 func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serverServerAddr string, serverListenAddr string, clientListenAddr string, strace *tracing.Tracer) error {
 	s.serverId = serverId
 
@@ -241,9 +251,7 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	trace.RecordAction(ServerStart{serverId})
 
 	// Connect to coord
-	cConn, cClient, err := establishRPCConnection(serverAddr, coordAddr)
-	defer cConn.Close()
-	defer cClient.Close()
+	_, cClient, err := establishRPCConnection(serverAddr, coordAddr)
 
 	/* Join */
 	// Send join request to coord; receive current tail
@@ -252,8 +260,16 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 		ServerId: serverId,
 		SToken:   trace.GenerateToken(),
 	}
-	var serverJoiningRes ServerJoiningRes
-	err = cClient.Call("Coord.OnServerJoining", serverJoiningArgs, &serverJoiningRes)
+	serverJoiningRes := &ServerJoiningRes{
+		TailServerListenAddr: "",
+		SToken:               nil,
+	}
+	if cClient == nil {
+		fmt.Println("it is nil.........")
+		fmt.Println(err)
+		return nil
+	}
+	err = cClient.Call("Coord.OnServerJoining", serverJoiningArgs, serverJoiningRes)
 	if err != nil {
 		return err
 	}
@@ -290,8 +306,10 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	serverAckAddr := fchecker.StartListener(fmt.Sprint(serverIP, ":"))
 
 	// Start listening for RPCs
+	remote := NewRemoteServer()
+	remote.Server = s
 	s.serverClientIP = getIPFromAddr(clientListenAddr)
-	err = rpc.Register(s)
+	err = rpc.RegisterName("Server", remote)
 	if err != nil {
 		return err
 	}
@@ -315,7 +333,12 @@ func (s *Server) Start(serverId uint8, coordAddr string, serverAddr string, serv
 	}
 	cClient.Go("Coord.OnServerJoined", serverJoinedArgs, nil, nil)
 
-	return errors.New("not implemented")
+	for {
+		// stay alive?
+		looping := 0
+		looping++
+	}
+	return nil
 }
 
 func getIPFromAddr(addr string) string {
@@ -450,7 +473,8 @@ func (s *Server) updateSuccessorInfo(successorListenAddr string) error {
 	return nil
 }
 
-func (s *Server) Get(args *GetArgs, _ interface{}) error {
+func (remoteServer *RemoteServer) Get(args *GetArgs, _ interface{}) error {
+	s := remoteServer.Server
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if !s.isTail {
@@ -484,7 +508,8 @@ func (s *Server) Get(args *GetArgs, _ interface{}) error {
 	return nil
 }
 
-func (s *Server) Put(args *PutArgs, gId *uint64) error {
+func (remoteServer *RemoteServer) Put(args *PutArgs, gId *uint64) error {
+	s := remoteServer.Server
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -523,7 +548,8 @@ func (s *Server) Put(args *PutArgs, gId *uint64) error {
 	return s.fwdOrReturnPut(trace, args.ClientIPPort, args.ClientId, args.OpId, *gId, args.Key, args.Value)
 }
 
-func (s *Server) PutFwd(args *PutFwdArgs, _ interface{}) error {
+func (remoteServer *RemoteServer) PutFwd(args *PutFwdArgs, _ interface{}) error {
+	s := remoteServer.Server
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

@@ -104,6 +104,16 @@ func NewCoord() *Coord {
 	return &Coord{}
 }
 
+type RemoteCoord struct {
+	Coord *Coord
+}
+
+func NewRemoteCoord() *RemoteCoord {
+	return &RemoteCoord{
+		Coord: nil,
+	}
+}
+
 func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lostMsgsThresh uint8, numServers uint8, ctrace *tracing.Tracer) error {
 
 	c.Tracer = ctrace
@@ -125,19 +135,28 @@ func (c *Coord) Start(clientAPIListenAddr string, serverAPIListenAddr string, lo
 		return err
 	}
 
-	rpc.Register(c)
+	remote := NewRemoteCoord()
+	remote.Coord = c
+	err = rpc.RegisterName("Coord", remote)
+	if err != nil {
+		return err
+	}
 
 	go rpc.Accept(lnClient)
 	go rpc.Accept(lnServer)
 
-	for true {
-
+	for {
+		// stay alive?
+		looping := 0
+		looping++
 	}
-
 	return nil
 }
 
-func (c *Coord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoiningRes *ServerJoiningRes) error {
+// TODO not accepting client connections...
+
+func (remoteCoord *RemoteCoord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoiningRes *ServerJoiningRes) error {
+	c := remoteCoord.Coord
 	trace := c.Tracer.ReceiveToken(serverJoiningArgs.SToken)
 	trace.RecordAction(ServerJoiningRecvd{
 		ServerId: serverJoiningArgs.ServerId,
@@ -154,7 +173,8 @@ func (c *Coord) OnServerJoining(serverJoiningArgs *ServerJoiningArgs, serverJoin
 	return nil
 }
 
-func (c *Coord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoiningRes) error {
+func (remoteCoord *RemoteCoord) OnJoined(serverJoinedArgs *ServerJoinedArgs, serverJoinedRes *ServerJoiningRes) error {
+	c := remoteCoord.Coord
 	trace := c.Tracer.ReceiveToken(serverJoinedArgs.SToken)
 	trace.RecordAction(ServerJoinedRecvd{
 		ServerId: serverJoinedArgs.ServerId,
@@ -189,7 +209,8 @@ func (c *Coord) OnServerFailure(failedServer ServerInfo) {
 	// TODO: RPC servers that need to change their prev/next
 }
 
-func (c *Coord) GetHead(args *ClientArgs, headAddr *string) error {
+func (remoteCoord *RemoteCoord) GetHead(args *ClientArgs, headAddr *string) error {
+	c := remoteCoord.Coord
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := HeadReqRecvd{
 		ClientId: args.ClientId,
@@ -209,7 +230,8 @@ func (c *Coord) GetHead(args *ClientArgs, headAddr *string) error {
 	return nil
 }
 
-func (c *Coord) GetTail(args *ClientArgs, tailAddr *string) error {
+func (remoteCoord *RemoteCoord) GetTail(args *ClientArgs, tailAddr *string) error {
+	c := remoteCoord.Coord
 	trace := c.Tracer.ReceiveToken(args.KToken)
 	req := TailReqRecvd{
 		ClientId: args.ClientId,
