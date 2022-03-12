@@ -232,7 +232,7 @@ func listen(ln *net.UDPConn) {
 		case <-listenCh:
 			fmt.Println("--- STOP LISTENING ---")
 			return
-		case <-time.After(time.Duration(10) * time.Microsecond):
+		case <-time.After(time.Second):
 			// Receive heartbeats
 			var heartbeat HBeatMessage
 			remoteAddr, err := receiveHeartbeat(&heartbeat, ln)
