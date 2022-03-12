@@ -353,7 +353,11 @@ func (d *KVS) contactCoord() error {
 		ClientAddr: d.LocalCoordAddr,
 		KToken:     token,
 	}
-	var headRes ClientRes
+	headRes := &ClientRes{
+		ServerId:   0,
+		ServerAddr: "",
+		KToken:     nil,
+	}
 	d.KTrace.RecordAction(HeadReq{d.ClientId})
 	err := client.Call("Coord.GetHead", headReqArgs, &headRes)
 	if err != nil {
@@ -366,7 +370,7 @@ func (d *KVS) contactCoord() error {
 	})
 
 	// Request tail server from coord
-	tailReqArgs := ClientArgs{
+	tailReqArgs := &ClientArgs{
 		ClientId:   d.ClientId,
 		ClientAddr: d.LocalCoordAddr,
 		KToken:     token,
